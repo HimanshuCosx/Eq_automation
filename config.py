@@ -1,0 +1,1 @@
+BASE_URL = "https://eq-os-frontend-git-staging-cosx-projects.vercel.app/"
