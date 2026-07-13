@@ -1,8 +1,8 @@
 import pytest
 
-from pages.login import login
 
 @pytest.mark.smoke
 def test_login(page):
-    a=login(page)
-    a.login_page()
+    # Login is performed once by the session `page` fixture (see conftest.py).
+    # Here we just confirm the session is authenticated (no longer on /login).
+    assert "/login" not in page.url

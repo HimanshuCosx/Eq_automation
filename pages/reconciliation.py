@@ -7,7 +7,11 @@ class reconciliation:
         # self.menu_btn = page.get_by_role("button", name="Open navigation menu")
         self.recon_link = page.get_by_role("link", name="Reconciliation")
         self.heading = page.locator("//h1[normalize-space()='Reconciliation']")
-        self.calander=page.locator("(//button[@class='inline-flex w-fit items-center justify-center whitespace-nowrap cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-60 [&_svg]:pointer-events-none [&_svg]:shrink-0 hover:bg-bg-success hover:text-brand-teal disabled:bg-bg-subtle disabled:text-text-muted py-2 typo-title-1-m h-[34px] gap-2 rounded-sm border border-border-subtle bg-bg-surface px-[13px] text-[13.5px] font-semibold text-text-primary sm:gap-2 sm:px-[13px]'])[1]")
+        # The period/calendar button shows dynamic text like "Jul 2026" and has no
+        # aria-label, so match it by the 4-digit year it always contains instead of
+        # a brittle class-based XPath.
+        self.calander = page.get_by_role("button", name=re.compile(r"20\d{2}"))
+        self.tab_monthly = page.get_by_role("button", name="Monthly")
         self.prev_period = page.get_by_role("button", name="Previous period")
         self.next_period = page.get_by_role("button", name="Next period")
         self.cal_feb = page.get_by_role("button", name="Feb", exact=True)
@@ -27,14 +31,25 @@ class reconciliation:
             "button", name=re.compile(r"^(Expand|Collapse) row$")
         ).first
 
+    def _open_calendar(self):
+        # On Firefox/WebKit the first click on the period button only focuses it
+        # (a focus/blur race) while Chromium opens the popover on the first click.
+        # Click until the Monthly tab becomes visible so it works on every engine.
+        for _ in range(4):
+            if self.tab_monthly.is_visible():
+                return
+            self.calander.click()
+            self.page.wait_for_timeout(800)
+        self.tab_monthly.wait_for(state="visible", timeout=5000)
+
     def reconciliation_page(self):
         # self.menu_btn.hover()
         self.recon_link.click()
         self.page.wait_for_timeout(2000)
         self.prev_period.click()
         self.next_period.click()
-        self.calander.click()
-        self.page.wait_for_timeout(2000)
+        self._open_calendar()
+        self.page.wait_for_timeout(1000)
         self.cal_feb.click()
         self.page.wait_for_timeout(2000)
         self.import_data_btn.click()
