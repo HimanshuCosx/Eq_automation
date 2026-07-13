@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Pytest / test artifacts
+.pytest_cache/
+reports/
+allure-results/
+allure-report/
+tests/allure-results/
