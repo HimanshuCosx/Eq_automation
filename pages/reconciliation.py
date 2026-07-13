@@ -48,7 +48,7 @@ class reconciliation:
     def reconciliation_page(self):
         log.info("Opening the Reconciliation page")
         self.recon_link.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         log.info("Stepping through previous / next period controls")
         self.prev_period.click()
@@ -58,7 +58,7 @@ class reconciliation:
         self._open_calendar()
         self.page.wait_for_timeout(1000)
         self.cal_feb.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         log.info("Opening and closing the Import Data dialog")
         self.import_data_btn.click()
@@ -68,30 +68,30 @@ class reconciliation:
 
         log.info("Switching between All CPOs and Discrepancies-only tabs")
         self.all_cpos_tab.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.discrepancies_tab.click()
 
         log.info("Filtering by sub-organisation, then clearing all filters")
         self.suborg_dropdown.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.suborg_option.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.filter_delete.click()
 
         log.info("Searching for a CPO, then clearing the search")
         self.search.fill("east of england")
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.search_clear.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         # Drill into a CPO -> site -> sessions, then expand rows
         log.info("Drilling into CPO -> site -> sessions and expanding rows")
         self.cpo_mulberry.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.site_moulton.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.expand_all_btn.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.first_row_toggle.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         log.info("Reconciliation workflow completed")

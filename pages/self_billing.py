@@ -77,7 +77,7 @@ class self_billing:
         self.tab_yearly.click()
         self.page.wait_for_timeout(1000)
         self.tab_monthly.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(2000)
         # Pick a past month (data reloads for the selected period)
         log.info("Selecting February and waiting for data to reload")
         self.cal_feb.click()
@@ -86,14 +86,14 @@ class self_billing:
         # Search a CPO, then clear the search
         log.info("Searching for a CPO, then clearing the search")
         self.search.fill("Snape")
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.search_clear.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         # Drill into the first CPO row to reveal its sub-organisation rows
         log.info("Expanding the first CPO row, then collapsing all rows")
         self.first_row_toggle.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         # Collapse every expanded row again
         self.collapse_all.click()
@@ -102,7 +102,7 @@ class self_billing:
         # Page through the CPO list
         log.info("Paging forward and back through the CPO list")
         self.next_page.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.prev_page.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         log.info("Self Billing workflow completed")
