@@ -21,9 +21,11 @@ class reconciliation:
         self.import_data_btn = page.get_by_role("button", name="Import Data")
         self.import_close = page.get_by_role("dialog").get_by_role("button", name="Close")
         self.search = page.get_by_placeholder("Search CPOs by name or ID...")
+        self.suborg_name = "Plug-N-Go Gibraltar Limited"
         self.suborg_dropdown = page.get_by_role("button", name="All sub-organisations")
-        self.suborg_option = page.get_by_role("option", name="Plug-N-Go Gibraltar Limited")
-        self.filter_delete = page.get_by_role("button", name="Clear all filters")
+        self.suborg_option = page.get_by_role("option", name=self.suborg_name)
+        # Once a sub-org is picked the dropdown button is relabelled to that name.
+        self.suborg_dropdown_filtered = page.get_by_role("button", name=self.suborg_name)
         self.search_clear = page.get_by_role("button", name="Clear", exact=True)
         self.all_cpos_tab = page.locator("(//button[normalize-space()='All CPOs'])[1]")
         self.discrepancies_tab = page.locator("(//button[normalize-space()='Discrepancies only'])[1]")
@@ -71,12 +73,21 @@ class reconciliation:
         self.page.wait_for_timeout(1000)
         self.discrepancies_tab.click()
 
-        log.info("Filtering by sub-organisation, then clearing all filters")
+        log.info("Filtering by sub-organisation, then clearing the filter")
         self.suborg_dropdown.click()
         self.page.wait_for_timeout(1000)
         self.suborg_option.click()
         self.page.wait_for_timeout(1000)
-        self.filter_delete.click()
+
+        # The "Clear filters" button only renders inside the "No CPOs match the
+        # current filters" empty state, so it is absent whenever the filter
+        # matches rows. Re-selecting the already-selected option toggles the
+        # sub-org filter off regardless of how many rows matched.
+        self.suborg_dropdown_filtered.click()
+        self.page.wait_for_timeout(1000)
+        self.suborg_option.click()
+        self.page.wait_for_timeout(1000)
+        self.suborg_dropdown.wait_for(state="visible", timeout=5000)
 
         log.info("Searching for a CPO, then clearing the search")
         self.search.fill("east of england")
