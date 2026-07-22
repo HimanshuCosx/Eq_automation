@@ -14,7 +14,6 @@ class reconciliation:
         # aria-label, so match it by the 4-digit year it always contains instead of
         # a brittle class-based XPath.
         self.calander = page.get_by_role("button", name=re.compile(r"20\d{2}"))
-        self.tab_monthly = page.get_by_role("button", name="Monthly")
         self.prev_period = page.get_by_role("button", name="Previous period")
         self.next_period = page.get_by_role("button", name="Next period")
         self.cal_feb = page.get_by_role("button", name="Feb", exact=True)
@@ -31,21 +30,23 @@ class reconciliation:
         self.discrepancies_tab = page.locator("(//button[normalize-space()='Discrepancies only'])[1]")
         self.cpo_mulberry = page.get_by_text("Mulberry Homes", exact=True).first
         self.site_moulton = page.get_by_text("Moulton", exact=True).first
-        self.expand_all_btn = page.get_by_role("button", name="Expand all")
-        self.first_row_toggle = page.get_by_role(
-            "button", name=re.compile(r"^(Expand|Collapse) row$")
-        ).first
+        # Sessions level (the deepest drill-down) is a flat table with its own
+        # "All sessions" / "Discrepancies only" toggle -- there are no expandable
+        # rows any more.
+        self.sessions_all_tab = page.get_by_role("button", name="All sessions")
 
     def _open_calendar(self):
-        # On Firefox/WebKit the first click on the period button only focuses it
-        # (a focus/blur race) while Chromium opens the popover on the first click.
-        # Click until the Monthly tab becomes visible so it works on every engine.
+        # Clicking the period button toggles a month-picker popover. The popover
+        # now shows a month grid (Jan..Dec under a year header) rather than the
+        # old Monthly/Weekly tab set, so wait on a month cell instead. On
+        # Firefox/WebKit the first click can only focus the button (a focus/blur
+        # race), so click until the grid is showing so it works on every engine.
         for _ in range(4):
-            if self.tab_monthly.is_visible():
+            if self.cal_feb.is_visible():
                 return
             self.calander.click()
             self.page.wait_for_timeout(800)
-        self.tab_monthly.wait_for(state="visible", timeout=5000)
+        self.cal_feb.wait_for(state="visible", timeout=5000)
 
     def reconciliation_page(self):
         log.info("Opening the Reconciliation page")
@@ -95,14 +96,19 @@ class reconciliation:
         self.search_clear.click()
         self.page.wait_for_timeout(1000)
 
-        # Drill into a CPO -> site -> sessions, then expand rows
-        log.info("Drilling into CPO -> site -> sessions and expanding rows")
+        # Drill into a CPO -> site -> sessions. The sessions view is now a flat
+        # table (no expandable rows), so confirm it loaded and exercise its
+        # All sessions / Discrepancies-only toggle instead.
+        log.info("Drilling into CPO -> site -> sessions")
         self.cpo_mulberry.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(1500)
         self.site_moulton.click()
-        self.page.wait_for_timeout(1000)
-        self.expand_all_btn.click()
-        self.page.wait_for_timeout(1000)
-        self.first_row_toggle.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(1500)
+        self.page.wait_for_url(re.compile(r"/sessions"), timeout=10000)
+
+        log.info("Toggling the sessions Discrepancies-only / All sessions views")
+        self.discrepancies_tab.click()
+        self.page.wait_for_timeout(1200)
+        self.sessions_all_tab.click()
+        self.page.wait_for_timeout(1200)
         log.info("Reconciliation workflow completed")
