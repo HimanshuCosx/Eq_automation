@@ -94,13 +94,16 @@ class tracker_templates:
     def _find_by_name(self, name):
         """Search for `name` and return its row once the table has settled."""
         self.search.fill(name)
-        self.page.wait_for_timeout(2500)
+        # The table re-renders asynchronously after a search; this settle is the
+        # critical sync point for the create/verify/delete assertions, so it is
+        # kept generous (the same helper checks both "row present" and "row gone").
+        self.page.wait_for_timeout(2000)
         return self._own_row(name)
 
     def open_page(self):
         log.info("Opening the Tracker Templates page")
         self.tt_link.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         self.heading.wait_for(state="visible", timeout=10000)
 
     # ----------------------------------------------------------------- #
@@ -109,31 +112,31 @@ class tracker_templates:
     def browse_list(self):
         log.info("Searching templates by name, then clearing the search")
         self.search.fill("Staging")
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         log.info("Search narrowed the list to %s row(s)", self.rows.count())
         self.search_clear.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         log.info("Filtering by status (Active, then Inactive)")
         self.status_filter.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.opt_active.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         # The filter button is relabelled to the selected value.
         self.page.get_by_role("button", name="Active", exact=True).click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.opt_inactive.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         log.info("Filtering by deal type, then clearing all filters")
         self.deal_type_filter.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.opt_owned_cpo.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         # Only rendered while at least one filter is active.
         self.clear_all_filters.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.status_filter.wait_for(state="visible", timeout=5000)
         log.info("Filters cleared, back to %s row(s)", self.rows.count())
 
@@ -142,9 +145,9 @@ class tracker_templates:
         if self.next_page.is_enabled():
             log.info("Paging forward and back through the template list")
             self.next_page.click()
-            self.page.wait_for_timeout(1500)
+            self.page.wait_for_timeout(750)
             self.prev_page.click()
-            self.page.wait_for_timeout(1500)
+            self.page.wait_for_timeout(750)
         else:
             log.info("Only one page of templates, skipping pagination")
 
@@ -157,25 +160,25 @@ class tracker_templates:
         """
         log.info("Opening the Add Template form and cancelling out of it")
         self.add_template_btn.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.name_input.fill("Discarded by automation")
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         log.info("Cancelling a dirty form, then choosing Stay")
         self.cancel_btn.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.unsaved_dialog.wait_for(state="visible", timeout=10000)
         self.stay_btn.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         assert self.name_input.input_value() == "Discarded by automation", (
             "Stay should have kept the form as it was"
         )
 
         log.info("Cancelling again, this time discarding the changes")
         self.cancel_btn.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.discard_btn.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         self.heading.wait_for(state="visible", timeout=10000)
         self.add_template_btn.wait_for(state="visible", timeout=10000)
 
@@ -185,36 +188,36 @@ class tracker_templates:
     def create_template(self):
         log.info("Creating a new template: %s", self.template_name)
         self.add_template_btn.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         self.name_input.fill(self.template_name)
         self.desc_input.fill("Created by the automated regression suite")
         self.deal_type_owned.click()
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         log.info("Adding a step with a checklist item")
         self.add_step_btn.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.step_name.fill("Automated Step 1")
         self.step_desc.fill("Step added by the automated suite")
         self.step_days.fill("3")
 
         # Owner dropdown defaults to "Ops Team"; pick a different owner.
         self.step_owner.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.page.get_by_role("option", name="Internal Team", exact=True).click()
-        self.page.wait_for_timeout(800)
+        self.page.wait_for_timeout(400)
 
         # A checklist item left blank fails validation and silently blocks the
         # save, so always give it text.
         self.add_item_btn.click()
-        self.page.wait_for_timeout(800)
+        self.page.wait_for_timeout(400)
         self.checklist_item.fill("Automated checklist item")
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         log.info("Saving the template as a draft")
         self.save_draft_btn.click()
-        self.page.wait_for_timeout(4000)
+        self.page.wait_for_timeout(2000)
         # A successful save redirects to the edit screen for the new template.
         self.page.wait_for_url(re.compile(r"/workflow-templates/[0-9a-f-]+/edit"), timeout=15000)
         log.info("Template saved, now on: %s", self.page.url)
@@ -234,7 +237,7 @@ class tracker_templates:
     def edit_template(self):
         log.info("Opening the new template for editing")
         self.page.get_by_role("link", name=self.template_name, exact=True).first.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         self.page.wait_for_url(re.compile(r"/workflow-templates/[0-9a-f-]+/edit"), timeout=15000)
 
         assert self.name_input.input_value() == self.template_name, (
@@ -243,9 +246,9 @@ class tracker_templates:
 
         log.info("Renaming the template to: %s", self.edited_name)
         self.name_input.fill(self.edited_name)
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
         self.save_draft_btn.click()
-        self.page.wait_for_timeout(4000)
+        self.page.wait_for_timeout(2000)
         log.info("Edit saved")
 
     # ----------------------------------------------------------------- #
@@ -261,14 +264,14 @@ class tracker_templates:
 
         log.info("Opening the delete confirmation, then cancelling it")
         row.first.get_by_role("button", name="Delete template").click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.dialog_cancel.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         assert self._own_row(self.edited_name).count() == 1, "cancel should not delete"
 
         log.info("Deleting the template created by this run")
         row.first.get_by_role("button", name="Delete template").click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         # Final guard: only confirm once the dialog names *our* template.
         dialog_text = self.dialog.first.text_content() or ""
@@ -276,7 +279,7 @@ class tracker_templates:
             f"refusing to delete: confirmation names something else -> {dialog_text!r}"
         )
         self.dialog_delete.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
 
         gone = self._find_by_name(self.edited_name)
         assert gone.count() == 0, "template still listed after delete"

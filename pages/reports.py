@@ -96,13 +96,16 @@ class reports:
     def _find_by_name(self, name):
         """Search for `name` and return its row once the table has settled."""
         self.search.fill(name)
-        self.page.wait_for_timeout(2500)
+        # The table re-renders asynchronously after a search; this settle is the
+        # critical sync point for the create/verify/delete assertions, so it is
+        # kept generous (the same helper checks both "row present" and "row gone").
+        self.page.wait_for_timeout(2000)
         return self._own_row(name)
 
     def open_page(self):
         log.info("Opening the Reports page")
         self.reports_link.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         self.new_report_btn.wait_for(state="visible", timeout=10000)
 
     # ----------------------------------------------------------------- #
@@ -111,28 +114,28 @@ class reports:
     def browse_list(self):
         log.info("Searching reports by name, then clearing the search")
         self.search.fill("Finance")
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         log.info("Search narrowed the list to %s row(s)", self.rows.count())
         self.search.fill("")
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         log.info("Filtering by category (Financial), then clearing all filters")
         self.category_filter.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.page.get_by_role("option", name="Financial", exact=True).click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         # Only rendered while at least one filter is active.
         self.clear_all_filters.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.category_filter.wait_for(state="visible", timeout=5000)
 
         log.info("Filtering by frequency (Monthly), then clearing all filters")
         self.frequency_filter.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.page.get_by_role("option", name="Monthly", exact=True).click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.clear_all_filters.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.frequency_filter.wait_for(state="visible", timeout=5000)
         log.info("Filters cleared, back to %s row(s)", self.rows.count())
 
@@ -147,7 +150,7 @@ class reports:
             self.tab_all,
         ):
             tab.click()
-            self.page.wait_for_timeout(1500)
+            self.page.wait_for_timeout(750)
         log.info("Back on the All tab with %s row(s)", self.rows.count())
 
     def view_report(self):
@@ -156,7 +159,7 @@ class reports:
         self.open_page()
         self.rows.first.wait_for(state="visible", timeout=10000)
         self.rows.first.get_by_role("button", name="View report").click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         # A report detail URL is /admin/reports/<uuid>.
         self.page.wait_for_url(
             re.compile(r"/admin/reports/[0-9a-f-]{36}"), timeout=15000
@@ -172,35 +175,35 @@ class reports:
         log.info("Creating a new custom report: %s", self.report_name)
         self.open_page()
         self.new_report_btn.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         self.page.wait_for_url(re.compile(r"/admin/reports/new"), timeout=15000)
 
         # The builder opens with a default Organization / Sessions grouping,
         # which is enough to save -- we keep it as-is and just name and store
         # the report.
         self.save_btn.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.save_dialog.wait_for(state="visible", timeout=10000)
 
         self.report_name_input.fill(self.report_name)
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         # Category and Visibility are custom listbox-trigger buttons whose label
         # is the current value; scope them to the dialog so they can't collide
         # with the list's own category filter.
         log.info("Setting category (Financial) and visibility (My organisation)")
         self.save_dialog.get_by_role("button", name="Select a category").click()
-        self.page.wait_for_timeout(800)
+        self.page.wait_for_timeout(400)
         self.page.get_by_role("option", name="Financial", exact=True).click()
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         self.save_dialog.get_by_role("button", name="Only me").click()
-        self.page.wait_for_timeout(800)
+        self.page.wait_for_timeout(400)
         self.page.get_by_role("option", name="My organisation", exact=True).click()
-        self.page.wait_for_timeout(500)
+        self.page.wait_for_timeout(400)
 
         self.dialog_save_report.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
         # A successful save redirects to the saved report's detail page.
         self.page.wait_for_url(
             re.compile(r"/admin/reports/[0-9a-f-]{36}"), timeout=15000
@@ -229,18 +232,18 @@ class reports:
 
         log.info("Opening the delete confirmation, then cancelling it")
         row.first.get_by_role("button", name="Delete report").click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.delete_dialog.wait_for(state="visible", timeout=10000)
         self.delete_cancel.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         assert self._own_row(self.report_name).count() == 1, "cancel should not delete"
 
         log.info("Deleting the report created by this run")
         row.first.get_by_role("button", name="Delete report").click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.delete_dialog.wait_for(state="visible", timeout=10000)
         self.dialog_delete.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
 
         gone = self._find_by_name(self.report_name)
         assert gone.count() == 0, "report still listed after delete"

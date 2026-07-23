@@ -87,10 +87,34 @@ class device_ownership:
         """The single row for `device_id`, matched on the printed 'ID: xxx'."""
         return self._data_rows().filter(has_text=f"ID: {device_id}")
 
+    def _poll(self, predicate, timeout_ms=8000, interval_ms=150):
+        """Poll `predicate` until truthy (or timeout), returning its last value.
+
+        The device table reloads asynchronously after a search or a write, so
+        the row count is polled until it settles instead of racing a fixed
+        sleep -- fast when the row appears at once, patient when staging lags.
+        """
+        elapsed = 0
+        while elapsed < timeout_ms:
+            if predicate():
+                return True
+            self.page.wait_for_timeout(interval_ms)
+            elapsed += interval_ms
+        return predicate()
+
     def _find_device(self, device_id=DEVICE_ID):
-        self.search.fill(device_id)
-        self.page.wait_for_timeout(2500)
         row = self._device_row(device_id)
+        # Under load the controlled search input can drop a fill before its
+        # onChange is wired, leaving the table unfiltered; re-fill and re-poll a
+        # couple of times before giving up so a dropped keystroke is not a
+        # failure.
+        for attempt in range(3):
+            self.search.fill("")
+            self.search.fill(device_id)
+            if self._poll(lambda: row.count() == 1, timeout_ms=6000):
+                break
+            log.info("Device %s not listed yet (attempt %d) -- retrying the search",
+                     device_id, attempt + 1)
         assert row.count() == 1, (
             f"expected exactly 1 row for device {device_id!r}, found {row.count()}"
         )
@@ -103,10 +127,23 @@ class device_ownership:
         assert value in ("Owned", "Managed"), f"unexpected ownership value: {value!r}"
         return value
 
+    def _ownership_value(self, device_id=DEVICE_ID):
+        """Ownership cell value, or None if the row is not (yet) rendered.
+
+        A non-asserting read for polling: after a write the table reloads and
+        the row briefly disappears, so this returns None instead of raising
+        until the row is back and carries a valid value.
+        """
+        row = self._device_row(device_id)
+        if row.count() != 1:
+            return None
+        value = (row.first.locator("td").nth(2).text_content() or "").strip()
+        return value if value in ("Owned", "Managed") else None
+
     def open_page(self):
         log.info("Opening the Device Ownership page")
         self.do_link.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
         self.heading.wait_for(state="visible", timeout=10000)
 
     # ----------------------------------------------------------------- #
@@ -115,50 +152,50 @@ class device_ownership:
     def browse_list(self):
         log.info("Searching devices, then clearing the search")
         self.search.fill("Capurro")
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         log.info("Search narrowed the list to %s device(s)", self._data_rows().count())
         self.search_clear.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         log.info("Filtering by CPO")
         self.cpo_filter.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.page.get_by_role("option", name="Capurro Garage", exact=True).click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         log.info("CPO filter left %s device(s)", self._data_rows().count())
 
         log.info("Filtering by verification status (Unverified only, then All)")
         self.verified_filter.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.opt_unverified.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         # The filter button is relabelled to the selected value.
         self.page.get_by_role("button", name="Unverified only", exact=True).click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.opt_all.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
         log.info("Clearing all filters")
         self.clear_all_filters.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.cpo_filter.wait_for(state="visible", timeout=5000)
 
         log.info("Filtering by site")
         self.site_filter.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.page.get_by_role("option", name="Capurro Garage", exact=True).click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.clear_all_filters.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
     def paginate(self):
         log.info("Paging forward and back through the device list")
         assert self.next_page.is_enabled(), "expected more than one page of devices"
         self.next_page.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.page.wait_for_url(re.compile(r"[?&]page=2"), timeout=10000)
         self.prev_page.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         self.page.wait_for_url(re.compile(r"[?&]page=1"), timeout=10000)
 
         # Read the current size off the trigger and switch to a larger one, so
@@ -169,9 +206,9 @@ class device_ownership:
         target = "50" if current != "50" else "100"
         log.info("Switching the page size from %s to %s", current, target)
         self.page_size.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.page.get_by_role("option", name=target, exact=True).click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
         count = self._data_rows().count()
         assert count > before, (
             f"expected more than {before} rows after resizing to {target}, got {count}"
@@ -180,9 +217,9 @@ class device_ownership:
 
         # Put it back so the rest of the run sees the original page size.
         self.page_size.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.page.get_by_role("option", name=current, exact=True).click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
 
     # ----------------------------------------------------------------- #
     # Edit dialog: validation only, nothing saved
@@ -193,7 +230,7 @@ class device_ownership:
         before = self._read_ownership()
 
         row.get_by_role("button", name="Edit ownership").click()
-        self.page.wait_for_timeout(1800)
+        self.page.wait_for_timeout(900)
         self.dialog.first.wait_for(state="visible", timeout=10000)
 
         # Reason is mandatory and must be 10-500 characters. These use expect()
@@ -212,7 +249,7 @@ class device_ownership:
 
         log.info("Cancelling the dialog without saving")
         self.dialog_cancel.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         assert self.dialog.count() == 0, "dialog should close on Cancel"
         assert self._read_ownership() == before, "Cancel must not change ownership"
 
@@ -223,7 +260,7 @@ class device_ownership:
         """Open the dialog for DEVICE_ID and save `target` ownership."""
         row = self._find_device()
         row.get_by_role("button", name="Edit ownership").click()
-        self.page.wait_for_timeout(1800)
+        self.page.wait_for_timeout(900)
         dlg = self.dialog.first
         dlg.wait_for(state="visible", timeout=10000)
 
@@ -241,9 +278,9 @@ class device_ownership:
         label = (dropdown.text_content() or "").strip()
         if label != target:
             dropdown.click()
-            self.page.wait_for_timeout(1200)
+            self.page.wait_for_timeout(600)
             self.page.get_by_role("option", name=target, exact=True).click()
-            self.page.wait_for_timeout(800)
+            self.page.wait_for_timeout(400)
 
         # Fill the reason *after* switching type: Save only enables once both
         # are valid, and this waits for that rather than assuming it.
@@ -262,9 +299,9 @@ class device_ownership:
         self.confirm_dialog.wait_for(state="visible", timeout=15000)
         log.info("Confirming the correction")
         self.confirm_save.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
         self.confirm_dialog.wait_for(state="hidden", timeout=15000)
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
 
     def toggle_ownership_and_revert(self):
         """Flip the device's ownership, then always put it back."""
@@ -277,8 +314,12 @@ class device_ownership:
         self._set_ownership(target, REASON)
         try:
             self._find_device()
-            assert self._read_ownership() == target, (
-                f"ownership did not change to {target}"
+            # The write rewrites CDRs server-side, so the table can take a moment
+            # to reflect the new owner -- poll for it rather than reading once.
+            assert self._poll(lambda: self._ownership_value() == target,
+                              timeout_ms=15000), (
+                f"ownership did not change to {target} "
+                f"(still {self._ownership_value()!r})"
             )
             log.info("Ownership correction saved: %s is now %s", DEVICE_ID, target)
         finally:
@@ -288,9 +329,10 @@ class device_ownership:
             self._set_ownership(original, f"{REASON} (revert)")
 
         self._find_device()
-        restored = self._read_ownership()
-        assert restored == original, (
-            f"FAILED TO REVERT: {DEVICE_ID} left as {restored}, expected {original}"
+        assert self._poll(lambda: self._ownership_value() == original,
+                          timeout_ms=15000), (
+            f"FAILED TO REVERT: {DEVICE_ID} left as {self._ownership_value()!r}, "
+            f"expected {original}"
         )
         log.info("Device %s restored to %s", DEVICE_ID, original)
 

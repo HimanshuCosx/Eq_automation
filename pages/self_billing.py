@@ -53,56 +53,56 @@ class self_billing:
             if self.tab_monthly.is_visible():
                 return
             self.month_button.click()
-            self.page.wait_for_timeout(800)
+            self.page.wait_for_timeout(400)
         self.tab_monthly.wait_for(state="visible", timeout=5000)
 
     def self_billing_page(self):
         # Open the Self Billing screen
         log.info("Opening the Self Billing page")
         self.sb_link.click()
-        self.page.wait_for_timeout(3000)
+        self.page.wait_for_timeout(1500)
 
         # Step through the previous / next period controls
         log.info("Stepping through previous / next period controls")
         self.prev_period.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.next_period.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         # Open the period picker and exercise its Monthly / Quarterly / Yearly tabs
         log.info("Exercising the Monthly / Quarterly / Yearly period tabs")
         self._open_period_picker()
         self.tab_quarterly.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.tab_yearly.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.tab_monthly.click()
-        self.page.wait_for_timeout(2000)
+        self.page.wait_for_timeout(1000)
         # Pick a past month (data reloads for the selected period)
         log.info("Selecting February and waiting for data to reload")
         self.cal_feb.click()
-        self.page.wait_for_timeout(2500)
+        self.page.wait_for_timeout(1250)
 
         # Search a CPO, then clear the search
         log.info("Searching for a CPO, then clearing the search")
         self.search.fill("Snape")
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.search_clear.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         # Drill into the first CPO row to reveal its sub-organisation rows
         log.info("Expanding the first CPO row, then collapsing all rows")
         self.first_row_toggle.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         # Collapse every expanded row again
         self.collapse_all.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
 
         # Page through the CPO list
         log.info("Paging forward and back through the CPO list")
         self.next_page.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.prev_page.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         log.info("Self Billing workflow completed")

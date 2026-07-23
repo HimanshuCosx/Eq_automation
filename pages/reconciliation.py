@@ -45,13 +45,13 @@ class reconciliation:
             if self.cal_feb.is_visible():
                 return
             self.calander.click()
-            self.page.wait_for_timeout(800)
+            self.page.wait_for_timeout(400)
         self.cal_feb.wait_for(state="visible", timeout=5000)
 
     def reconciliation_page(self):
         log.info("Opening the Reconciliation page")
         self.recon_link.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         log.info("Stepping through previous / next period controls")
         self.prev_period.click()
@@ -59,56 +59,56 @@ class reconciliation:
 
         log.info("Opening the calendar and selecting February")
         self._open_calendar()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.cal_feb.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         log.info("Opening and closing the Import Data dialog")
         self.import_data_btn.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.import_close.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         log.info("Switching between All CPOs and Discrepancies-only tabs")
         self.all_cpos_tab.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.discrepancies_tab.click()
 
         log.info("Filtering by sub-organisation, then clearing the filter")
         self.suborg_dropdown.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.suborg_option.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         # The "Clear filters" button only renders inside the "No CPOs match the
         # current filters" empty state, so it is absent whenever the filter
         # matches rows. Re-selecting the already-selected option toggles the
         # sub-org filter off regardless of how many rows matched.
         self.suborg_dropdown_filtered.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.suborg_option.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.suborg_dropdown.wait_for(state="visible", timeout=5000)
 
         log.info("Searching for a CPO, then clearing the search")
         self.search.fill("east of england")
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
         self.search_clear.click()
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(500)
 
         # Drill into a CPO -> site -> sessions. The sessions view is now a flat
         # table (no expandable rows), so confirm it loaded and exercise its
         # All sessions / Discrepancies-only toggle instead.
         log.info("Drilling into CPO -> site -> sessions")
         self.cpo_mulberry.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.site_moulton.click()
-        self.page.wait_for_timeout(1500)
+        self.page.wait_for_timeout(750)
         self.page.wait_for_url(re.compile(r"/sessions"), timeout=10000)
 
         log.info("Toggling the sessions Discrepancies-only / All sessions views")
         self.discrepancies_tab.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         self.sessions_all_tab.click()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(600)
         log.info("Reconciliation workflow completed")
