@@ -5,10 +5,11 @@ name: Daily Automation Tests
 # ---------------------------------------------------------------------------
 on:
   # 1) On a schedule. Cron times are in UTC (NOT your local time!).
-  #    '30 3 * * *'  ==  03:30 UTC  ==  09:00 IST (India, UTC+5:30).
+  #    '30 4 * * 1-5'  ==  04:30 UTC  ==  10:00 IST (India, UTC+5:30).
+  #    The '1-5' is the day-of-week field: Mon-Fri only (0/7=Sun, 6=Sat).
   #    Format:  minute hour day-of-month month day-of-week
   schedule:
-    - cron: "30 3 * * *"
+    - cron: "30 4 * * 1-5"
 
   # 2) A manual "Run workflow" button in the GitHub Actions tab,
   #    so you can trigger it any time without waiting for the schedule.
