@@ -1,0 +1,61 @@
+name: Daily Automation Tests
+
+# ---------------------------------------------------------------------------
+# WHEN this workflow runs
+# ---------------------------------------------------------------------------
+on:
+  # 1) On a schedule. Cron times are in UTC (NOT your local time!).
+  #    '30 3 * * *'  ==  03:30 UTC  ==  09:00 IST (India, UTC+5:30).
+  #    Format:  minute hour day-of-month month day-of-week
+  schedule:
+    - cron: "30 3 * * *"
+
+  # 2) A manual "Run workflow" button in the GitHub Actions tab,
+  #    so you can trigger it any time without waiting for the schedule.
+  workflow_dispatch:
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest        # GitHub gives you a fresh Linux machine
+    timeout-minutes: 30
+
+    env:
+      HEADLESS: "true"            # force headless browser in CI (no screen)
+
+    steps:
+      # Step 1: copy your repository onto the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Step 3: install your Python dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: install the Playwright browser + its OS libraries
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      # Step 5: run the test suite
+      #   `|| true` lets later steps run (upload the report) even if a test fails.
+      - name: Run pytest
+        run: pytest || true
+
+      # Step 6: save the HTML report so you can download it from the run page
+      - name: Upload test report
+        if: always()               # upload even when tests failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: |
+            reports/report.html
+            reports/pytest.log
+          retention-days: 14

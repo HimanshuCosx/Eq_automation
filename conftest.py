@@ -1,5 +1,6 @@
 import base64
 import logging
+import os
 
 import allure
 import pytest
@@ -13,10 +14,11 @@ log = logging.getLogger("eq_automation")
 
 @pytest.fixture(scope="session")
 def page():
-    log.info("Starting Playwright and launching Chromium (headed)")
+    # Headed locally by default; set HEADLESS=true (e.g. in CI) to run headless.
+    headless = os.getenv("HEADLESS", "false").lower() == "true"
+    log.info("Starting Playwright and launching Chromium (headless=%s)", headless)
     p = sync_playwright().start()
-    browser = p.chromium.launch(headless=False)
-    # browser = p.chromium.launch(headless=True)
+    browser = p.chromium.launch(headless=headless)
 
     context = browser.new_context(ignore_https_errors=True)
     page = context.new_page()
