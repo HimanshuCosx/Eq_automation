@@ -70,7 +70,7 @@ jobs:
       # Step 7: email the report to you (runs whether tests passed or failed)
       - name: Email the report
         if: always()
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v18
         with:
           server_address: smtp.gmail.com
           server_port: 465
