@@ -45,10 +45,16 @@ jobs:
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
 
-      # Step 5: run the test suite
-      #   `|| true` lets later steps run (upload the report) even if a test fails.
+      # Step 5: run the test suite.
+      #   We DON'T fail here — we save the exit code and keep going so the
+      #   report still gets uploaded and emailed. The job is failed later.
       - name: Run pytest
-        run: pytest || true
+        id: pytest
+        run: |
+          set +e
+          pytest
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
 
       # Step 6: save the HTML report so you can download it from the run page
       - name: Upload test report
@@ -60,3 +66,28 @@ jobs:
             reports/report.html
             reports/pytest.log
           retention-days: 14
+
+      # Step 7: email the report to you (runs whether tests passed or failed)
+      - name: Email the report
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Equidria Daily Test Report — ${{ job.status }}"
+          to: himanshu@cosx.ai
+          from: EQ Automation <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            The daily Equidria automation run has finished.
+            Job status: ${{ job.status }}
+            The full HTML report is attached.
+          attachments: reports/report.html
+
+      # Step 8: NOW fail the job if any test failed, so GitHub emails you an
+      #   alert too. This runs last, after the report is safely uploaded+emailed.
+      - name: Report test result
+        if: always()
+        run: exit ${{ steps.pytest.outputs.exit_code }}
