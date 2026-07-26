@@ -67,27 +67,8 @@ jobs:
             reports/pytest.log
           retention-days: 14
 
-      # Step 7: email the report to you (runs whether tests passed or failed)
-      - name: Email the report
-        if: always()
-        uses: dawidd6/action-send-mail@v18
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "Equidria Daily Test Report — ${{ job.status }}"
-          to: himanshu@cosx.ai
-          from: EQ Automation <${{ secrets.MAIL_USERNAME }}>
-          body: |
-            The daily Equidria automation run has finished.
-            Job status: ${{ job.status }}
-            The full HTML report is attached.
-          attachments: reports/report.html
-
-      # Step 8: NOW fail the job if any test failed, so GitHub emails you an
-      #   alert too. This runs last, after the report is safely uploaded+emailed.
+      # Step 7: fail the job if any test failed (runs last, after the report is
+      #   safely uploaded) so the run shows red and GitHub sends its alert.
       - name: Report test result
         if: always()
         run: exit ${{ steps.pytest.outputs.exit_code }}
