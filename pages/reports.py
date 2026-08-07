@@ -33,8 +33,16 @@ class reports:
         # Both filter triggers are custom listbox buttons whose label changes to
         # the selected value, so the reset always goes back through the button's
         # original text.
-        self.category_filter = page.get_by_role("button", name="All Categories")
-        self.frequency_filter = page.get_by_role("button", name="Frequency", exact=True)
+        # Both triggers render their label above their current value, so the
+        # accessible name is the two run together ("Frequency All
+        # frequencies"). Matched on the leading label: an exact match on either
+        # half stops resolving the moment a value is chosen.
+        self.category_filter = page.get_by_role(
+            "button", name=re.compile(r"^Category\b")
+        ).first
+        self.frequency_filter = page.get_by_role(
+            "button", name=re.compile(r"^Frequency\b")
+        ).first
         self.clear_all_filters = page.get_by_role("button", name="Clear all filters")
 
         # Tabs. The accessible name carries a live count ("All (05)"), so these

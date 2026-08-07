@@ -24,7 +24,12 @@ class reconciliation:
         self.suborg_dropdown = page.get_by_role("button", name="All sub-organisations")
         self.suborg_option = page.get_by_role("option", name=self.suborg_name)
         # Once a sub-org is picked the dropdown button is relabelled to that name.
-        self.suborg_dropdown_filtered = page.get_by_role("button", name=self.suborg_name)
+        # exact=True matters: once the filter is applied the page also renders
+        # a removable chip whose accessible name is "Remove <sub-org>", which a
+        # substring match would resolve to as well and fail on strict mode.
+        self.suborg_dropdown_filtered = page.get_by_role(
+            "button", name=self.suborg_name, exact=True
+        )
         self.search_clear = page.get_by_role("button", name="Clear", exact=True)
         self.all_cpos_tab = page.locator("(//button[normalize-space()='All CPOs'])[1]")
         self.discrepancies_tab = page.locator("(//button[normalize-space()='Discrepancies only'])[1]")

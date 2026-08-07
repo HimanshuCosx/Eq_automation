@@ -191,11 +191,19 @@ class operations_hub:
         self.row_maintenance = page.get_by_role("button", name="Maintenance", exact=True)
 
         # Filters on the CPO drill-down and the map
-        self.type_filter = page.get_by_role("button", name="All types", exact=True)
+        # Each filter trigger renders its label above its current value, so
+        # the accessible name is the two run together ("CPO All CPOs").
+        # Anchored on the label: matching the value half stops resolving as
+        # soon as a filter is applied.
+        self.type_filter = page.get_by_role(
+            "button", name=re.compile(r"^Deal Type\b")
+        ).first
         self.criticality_filter = page.get_by_role(
-            "button", name="All criticalities", exact=True
-        )
-        self.cpo_filter = page.get_by_role("button", name="All CPOs", exact=True)
+            "button", name=re.compile(r"^Criticality\b")
+        ).first
+        self.cpo_filter = page.get_by_role(
+            "button", name=re.compile(r"^CPO\b")
+        ).first
 
         # Pagination
         self.page_size = page.get_by_role(
@@ -418,9 +426,10 @@ class operations_hub:
         assert self._poll(lambda: self._cpo_rows().count() == 0), (
             f"expected no CPOs, got {self._cpo_rows().count()}"
         )
-        expect(
-            self.page.get_by_text("No CPOs found matching your criteria")
-        ).to_be_visible()
+        # The empty state now leads with a heading and repeats the term back
+        # underneath it ("No CPOs match “zzzz-no-such-cpo”."), so it is
+        # matched on the heading rather than on the old single-sentence copy.
+        expect(self.page.get_by_text("No CPOs found", exact=True)).to_be_visible()
         log.info("CPO empty state shown")
 
         self._clear_search(self.cpo_search)

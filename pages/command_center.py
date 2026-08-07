@@ -306,6 +306,14 @@ class command_center:
             assert self._poll(lambda: tooltip.count() == 0, timeout_ms=8000), (
                 f"the previous tooltip never closed before hovering {section!r}"
             )
+            # Scroll the icon into view and let the sidebar collapse before
+            # reaching for it. The nav is fixed to the left edge and widens
+            # from 125px to 294px while the pointer is anywhere over it, which
+            # covers the leading edge of the lower panels -- Playwright then
+            # reports the hover as intercepted by <nav> and retries until it
+            # times out, which is exactly how this check used to fail.
+            button.scroll_into_view_if_needed()
+            self._park_pointer()
             button.hover()
             assert self._poll(lambda: tooltip.count() > 0, timeout_ms=8000), (
                 f"the info icon on {section!r} raised no tooltip"
@@ -326,6 +334,20 @@ class command_center:
         assert not missing, f"no info tooltip found for {missing} (saw {seen})"
         log.info("All %s info tooltips explain the right section", count)
 
+    def _park_pointer(self):
+        """Move the pointer somewhere inert and let the sidebar collapse.
+
+        The nav is fixed to the left edge and widens from 125px to 294px while
+        hovered, covering the leading edge of everything below it. Any click or
+        hover aimed there is then intercepted by <nav> and retried until it
+        times out. The middle of the page header is clear of both the sidebar
+        and every tooltip trigger.
+        """
+        size = self.page.viewport_size or {"width": 1280, "height": 720}
+        self.page.mouse.move(size["width"] // 2, 30)
+        # The width transition is 500ms; give it time to finish retracting.
+        self.page.wait_for_timeout(600)
+
     def _dismiss_tooltip(self):
         """Close the open tooltip and let it leave the DOM.
 
@@ -338,8 +360,7 @@ class command_center:
         every later hover is intercepted and times out. Middle of the page
         header is clear of the sidebar and of every tooltip trigger.
         """
-        size = self.page.viewport_size or {"width": 1280, "height": 720}
-        self.page.mouse.move(size["width"] // 2, 30)
+        self._park_pointer()
         self.page.keyboard.press("Escape")
         self.page.wait_for_timeout(250)
 

@@ -62,10 +62,17 @@ class network_status:
                     "Unknown / Mixed"]
 
     # The three multi-select filters, mapped to the query parameter each drives.
+    #
+    # Keyed on the *label* each control carries rather than on its current
+    # value: the button's accessible name is the two run together ("Sub-
+    # Organisation All sub-organisations"), and the value half changes the
+    # moment a filter is applied. Matching on the leading label is therefore
+    # the only stable handle -- an exact match on the unfiltered value stops
+    # resolving as soon as anything is selected.
     FILTERS = {
-        "All sub-organisations": "organization_id",
-        "All CPOs": "cpo_id",
-        "All availability": "availability",
+        "Sub-Organisation": "organization_id",
+        "CPO": "cpo_id",
+        "Availability": "availability",
     }
 
     # The availability dropdown's options -- the same four buckets as the tiles.
@@ -379,7 +386,9 @@ class network_status:
     def check_filter_options(self):
         """Each multi-select filter opens with a searchable option list."""
         for trigger in self.FILTERS:
-            self.page.get_by_role("button", name=trigger, exact=True).click()
+            self.page.get_by_role(
+                "button", name=re.compile(rf"^{re.escape(trigger)}\b")
+            ).first.click()
             assert self._poll(
                 lambda: self.page.get_by_role("option").count() > 0
             ), f"the {trigger!r} filter opened with no options"

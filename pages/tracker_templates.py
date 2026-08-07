@@ -28,7 +28,14 @@ class tracker_templates:
         self.search_clear = page.get_by_role("button", name="Clear", exact=True)
 
         # Filters. "Clear all filters" only renders once a filter is applied.
-        self.status_filter = page.get_by_role("button", name="All Status")
+        # The trigger renders its label above its current value, so its
+        # accessible name is the two run together ("Status All Status", then
+        # "Status Active" once a value is picked). Anchored on the label so the
+        # same handle keeps working after a selection -- matching the value
+        # half stops resolving the moment it changes.
+        self.status_filter = page.get_by_role(
+            "button", name=re.compile(r"^Status\b")
+        ).first
         self.deal_type_filter = page.get_by_role("button", name="Deal Type")
         self.clear_all_filters = page.get_by_role("button", name="Clear all filters")
         # "Active" is a substring of "Inactive", so this option needs exact=True.
@@ -122,8 +129,10 @@ class tracker_templates:
         self.page.wait_for_timeout(500)
         self.opt_active.click()
         self.page.wait_for_timeout(750)
-        # The filter button is relabelled to the selected value.
-        self.page.get_by_role("button", name="Active", exact=True).click()
+        # Reopen the same trigger. It is relabelled to the selected value
+        # ("Status Active"), which is why it is located by its label rather
+        # than by the value it happens to be showing.
+        self.status_filter.click()
         self.page.wait_for_timeout(500)
         self.opt_inactive.click()
         self.page.wait_for_timeout(750)
@@ -219,7 +228,13 @@ class tracker_templates:
         self.save_draft_btn.click()
         self.page.wait_for_timeout(2000)
         # A successful save redirects to the edit screen for the new template.
-        self.page.wait_for_url(re.compile(r"/workflow-templates/[0-9a-f-]+/edit"), timeout=15000)
+        # The feature moved from /admin/workflow-templates to
+        # /admin/tracker-templates; both spellings are accepted so this keeps
+        # working either side of the rename.
+        self.page.wait_for_url(
+            re.compile(r"/(workflow|tracker)-templates/[0-9a-f-]+/edit"),
+            timeout=20000,
+        )
         log.info("Template saved, now on: %s", self.page.url)
 
     def verify_template_listed(self):
@@ -238,7 +253,13 @@ class tracker_templates:
         log.info("Opening the new template for editing")
         self.page.get_by_role("link", name=self.template_name, exact=True).first.click()
         self.page.wait_for_timeout(1250)
-        self.page.wait_for_url(re.compile(r"/workflow-templates/[0-9a-f-]+/edit"), timeout=15000)
+        # The feature moved from /admin/workflow-templates to
+        # /admin/tracker-templates; both spellings are accepted so this keeps
+        # working either side of the rename.
+        self.page.wait_for_url(
+            re.compile(r"/(workflow|tracker)-templates/[0-9a-f-]+/edit"),
+            timeout=20000,
+        )
 
         assert self.name_input.input_value() == self.template_name, (
             "edit form did not load the template we created"

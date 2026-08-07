@@ -24,7 +24,7 @@ CRITICALITY = "High"
 
 
 class deal_onboarding:
-    """Deal Onboarding (/operations/import-deal).
+    """Deal Onboarding (/operations/deal-onboarding).
 
     The pipeline of deals being brought onto the network: a searchable,
     filterable deal table whose rows expand to show the sites inside each deal,
@@ -99,11 +99,19 @@ class deal_onboarding:
         self.expanded = self.table.locator("tbody > tr:has(td[colspan])")
 
         # Filters
-        self.cpo_filter = page.get_by_role("button", name="All CPOs", exact=True)
-        self.type_filter = page.get_by_role("button", name="All types", exact=True)
+        # Each filter trigger renders its label above its current value, so
+        # the accessible name is the two run together ("CPO All CPOs").
+        # Anchored on the label: matching the value half stops resolving as
+        # soon as a filter is applied.
+        self.cpo_filter = page.get_by_role(
+            "button", name=re.compile(r"^CPO\b")
+        ).first
+        self.type_filter = page.get_by_role(
+            "button", name=re.compile(r"^Deal Type\b")
+        ).first
         self.criticality_filter = page.get_by_role(
-            "button", name="All criticalities", exact=True
-        )
+            "button", name=re.compile(r"^Criticality\b")
+        ).first
         self.clear_filters = page.get_by_role("button", name="Clear all filters")
 
         # Row expansion
@@ -278,7 +286,7 @@ class deal_onboarding:
         log.info("Opening Deal Onboarding")
         self.nav_link.click()
         self.page.wait_for_url(
-            re.compile(r"/operations/import-deal(\?|$)"), timeout=30000
+            re.compile(r"/operations/deal-onboarding(\?|$)"), timeout=30000
         )
         assert self._poll(self._loaded, timeout_ms=40000), (
             "the deal table never loaded"
@@ -695,7 +703,7 @@ class deal_onboarding:
         self._park_mouse()
         self.rows.first.get_by_role("button", name=DETAIL_DEAL).click()
         self.page.wait_for_url(
-            re.compile(r"/operations/import-deal/[0-9a-f-]{36}"), timeout=25000
+            re.compile(r"/operations/deal-onboarding/[0-9a-f-]{36}"), timeout=25000
         )
         expect(
             self.page.get_by_text(f"Deal : {DETAIL_DEAL}")
@@ -711,7 +719,7 @@ class deal_onboarding:
         log.info("Going back to the deal list")
         self.back.click()
         self.page.wait_for_url(
-            re.compile(r"/operations/import-deal(\?|$)"), timeout=25000
+            re.compile(r"/operations/deal-onboarding(\?|$)"), timeout=25000
         )
         assert self._poll(self._loaded, timeout_ms=30000), (
             "the deal table did not come back"
