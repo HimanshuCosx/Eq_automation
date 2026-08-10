@@ -69,7 +69,12 @@ class repository:
 
         # Sub-Org filter. The trigger is relabelled to "Sub-Org: <name>" once a
         # sub-org is picked, so re-opening it is matched on the leading text.
-        self.suborg_trigger = page.get_by_role("button", name="Sub-Org", exact=True)
+        # The trigger renders its label above its current value, so the
+        # accessible name is the two run together ("CPO All CPOs").
+        # Anchored on the label so it keeps resolving once a value is set.
+        self.suborg_trigger = page.get_by_role(
+            "button", name=re.compile(r"^Sub-Org\b")
+        ).first
         self.suborg_trigger_any = page.get_by_role(
             "button", name=re.compile(r"^Sub-Org")
         ).first

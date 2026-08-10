@@ -122,8 +122,15 @@ class command_center:
 
         # Filters. Each trigger relabels itself to "<Filter>: <value>" once a
         # value is picked, which is how the applied state is asserted.
-        self.ownership_filter = page.get_by_role("button", name="Ownership", exact=True)
-        self.cpo_filter = page.get_by_role("button", name="CPO", exact=True)
+        # The trigger renders its label above its current value, so the
+        # accessible name is the two run together ("CPO All CPOs").
+        # Anchored on the label so it keeps resolving once a value is set.
+        self.ownership_filter = page.get_by_role(
+            "button", name=re.compile(r"^Ownership\b")
+        ).first
+        self.cpo_filter = page.get_by_role(
+            "button", name=re.compile(r"^(CPO|Organisation)\b")
+        ).first
         self.window_filter = page.get_by_role(
             "button", name=re.compile(r"^Last \d+ days$")
         )

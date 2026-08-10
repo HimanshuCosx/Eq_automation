@@ -77,9 +77,20 @@ class device_ownership:
         self.search_clear = page.get_by_role("button", name="Clear", exact=True)
 
         # Filters. "Clear all filters" only renders once a filter is applied.
-        self.cpo_filter = page.get_by_role("button", name="CPO", exact=True)
-        self.site_filter = page.get_by_role("button", name="Site", exact=True)
-        self.verified_filter = page.get_by_role("button", name="All", exact=True)
+        # The trigger renders its label above its current value, so the
+        # accessible name is the two run together ("CPO All CPOs").
+        # Anchored on the label so it keeps resolving once a value is set.
+        self.cpo_filter = page.get_by_role(
+            "button", name=re.compile(r"^CPO\b")
+        ).first
+        self.site_filter = page.get_by_role(
+            "button", name=re.compile(r"^Site\b")
+        ).first
+        # Labelled "Verified" with its value ("All") beneath, so the bare
+        # value no longer resolves on its own.
+        self.verified_filter = page.get_by_role(
+            "button", name=re.compile(r"^Verified\b")
+        ).first
         self.clear_all_filters = page.get_by_role("button", name="Clear all filters")
         self.opt_unverified = page.get_by_role("option", name="Unverified only", exact=True)
         self.opt_all = page.get_by_role("option", name="All", exact=True)
@@ -475,12 +486,16 @@ class device_ownership:
         self.verified_filter.click()
         self.page.wait_for_timeout(600)
         self.opt_unverified.click()
-        # The filter button is relabelled to the selected value -- that is the
-        # proof the filter applied.
-        unverified_trigger = self.page.get_by_role(
-            "button", name="Unverified only", exact=True
+        # The trigger relabels to carry the selected value -- that is the proof
+        # the filter applied. It keeps its "Verified" label alongside it, so the
+        # value is checked inside the same control rather than as a bare button.
+        unverified_trigger = self.verified_filter
+        assert self._poll(
+            lambda: "Unverified only" in (unverified_trigger.inner_text() or "")
+        ), (
+            "the Verified trigger does not show the applied value: "
+            f"{unverified_trigger.inner_text()!r}"
         )
-        expect(unverified_trigger).to_be_visible()
         # The trigger relabels as soon as the click lands, but the table only
         # updates when the refetch comes back -- so poll for the *rows* to agree
         # with the filter rather than reading them straight away, or the stale

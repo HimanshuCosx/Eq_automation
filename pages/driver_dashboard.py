@@ -51,22 +51,25 @@ class driver_dashboard:
         "REVENUE": (r"£[\d,.]+", "Total revenue from driver charging"),
     }
 
+    # Note the two Revenue columns carry no "(£)" suffix: the currency is
+    # chosen once in the app header (the "GBP (£)" selector) rather than
+    # repeated per column, so the headings are the bare words.
     COLUMNS = ["Driver", "Type", "Status", "Charge Keys", "Sessions",
-               "Energy (kWh)", "Revenue (£)", "Revenue Total (£)",
+               "Energy (kWh)", "Revenue", "Revenue Total",
                "Last Session", "First Charged"]
 
     # Sortable columns and the `sort_by` value each sends.
     SORTABLE = {
         "Sessions": "sessions",
         "Energy (kWh)": "energy",
-        "Revenue (£)": "revenue",
+        "Revenue": "revenue",
         "Last Session": "last_session",
         "First Charged": "first_charged",
     }
     # Everything else in the header is deliberately not sortable. Note Revenue
     # Total is not, even though Revenue beside it is.
     NOT_SORTABLE = ["Driver", "Type", "Status", "Charge Keys",
-                    "Revenue Total (£)"]
+                    "Revenue Total"]
 
     STATUS_OPTIONS = ["Active", "Inactive", "Never charged"]
     DRIVER_TYPE_OPTIONS = ["App", "RFID", "One-time", "Payment terminal",
@@ -106,8 +109,16 @@ class driver_dashboard:
         self.date_filter = page.get_by_role(
             "button", name=DEFAULT_RANGE, exact=True
         )
-        self.status_filter = page.get_by_role("button", name="Status", exact=True)
-        self.type_filter = page.get_by_role("button", name="Driver Type", exact=True)
+        # Both triggers render their label above their current value, so the
+        # accessible name is the two run together ("Status All statuses").
+        # Anchored on the label: an exact match on either half stops resolving
+        # the moment a value is chosen.
+        self.status_filter = page.get_by_role(
+            "button", name=re.compile(r"^Status\b")
+        ).first
+        self.type_filter = page.get_by_role(
+            "button", name=re.compile(r"^Driver Type\b")
+        ).first
 
         # View toggle
         self.list_view = page.get_by_role("button", name="List", exact=True)
@@ -124,12 +135,15 @@ class driver_dashboard:
         self.next_page = page.get_by_role("button", name="Go to next page")
         self.prev_page = page.get_by_role("button", name="Go to previous page")
 
-        # Map controls
+        # Map controls. These render their label above the current value, so
+        # the accessible name is "Metric Sessions" rather than the older
+        # "Metric: Sessions" -- matched on the label alone, with the separator
+        # optional, so either spelling resolves.
         self.metric_filter = page.get_by_role(
-            "button", name=re.compile(r"^Metric: ")
+            "button", name=re.compile(r"^Metric\b")
         )
         self.display_filter = page.get_by_role(
-            "button", name=re.compile(r"^Display: ")
+            "button", name=re.compile(r"^Display\b")
         )
         self.zoom_in = page.get_by_role("button", name="Zoom in")
         self.zoom_out = page.get_by_role("button", name="Zoom out")
@@ -379,15 +393,19 @@ class driver_dashboard:
         assert self._poll(self._loaded, timeout_ms=20000), (
             f"the table did not repopulate under the {label} filter"
         )
-        expect(
-            self.page.get_by_role("button", name=f"{label}: {value}", exact=True)
-        ).to_be_visible()
+        # The applied value is shown inside the trigger itself ("Status
+        # Active") rather than on a separate "Status: Active" chip beside it,
+        # so the trigger is what gets checked -- and what gets reopened below.
+        assert self._poll(
+            lambda: value in (trigger.inner_text() or ""), timeout_ms=15000
+        ), (
+            f"the {label} trigger does not show the applied value {value!r}: "
+            f"{trigger.inner_text()!r}"
+        )
         log.info("%s filter %r applied -> %s row(s)", label, value, self.rows.count())
 
         log.info("Clearing the %s filter by re-selecting %r", label, value)
-        self.page.get_by_role(
-            "button", name=f"{label}: {value}", exact=True
-        ).click()
+        trigger.click()
         self.page.wait_for_timeout(1200)
         selected = self.page.get_by_role("option", name=value, exact=True)
         expect(selected).to_have_attribute("aria-selected", "true")
@@ -544,7 +562,7 @@ class driver_dashboard:
         # because it sits at the right-hand end of the table, well clear of the
         # sidebar -- and because it is the interesting case: the Revenue column
         # immediately beside it *is* sortable.
-        col = "Revenue Total (£)"
+        col = "Revenue Total"
         before = self._settled_names()
         url = self.page.url
         self._park_mouse()
@@ -690,7 +708,12 @@ class driver_dashboard:
         next option click would then wait forever for an element that is no
         longer on the page.
         """
-        original = (trigger.first.inner_text() or "").strip().split(": ", 1)[-1]
+        # The trigger reads "Metric\nSessions" (older builds: "Metric:
+        # Sessions"), so the current value is whatever follows the label on
+        # either separator.
+        original = re.split(
+            r":\s*|\n", (trigger.first.inner_text() or "").strip()
+        )[-1].strip()
 
         self._open_map_control(trigger, label)
         listed = [

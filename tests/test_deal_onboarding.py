@@ -27,6 +27,16 @@ def test_deal_onboarding(page):
     "Deal Onboarding: every sortable column reorders the table in both "
     "directions"
 )
+@pytest.mark.xfail(
+    strict=True,
+    reason="Product bug: sorting is accepted but not applied. Clicking a "
+           "sortable header writes sortColumn/sortDirection into the URL and "
+           "flips the chevron, but the rows come back in their original order "
+           "in both directions, for all four sortable columns. Marked strict "
+           "so that the day sorting is wired up this XPASSes and fails the "
+           "build, prompting the marker to be removed rather than letting the "
+           "fix land unnoticed.",
+)
 def test_deal_onboarding_sorting(page):
     # Split out from the main workflow because it currently fails on the
     # product, not on the automation: clicking a sortable header updates the

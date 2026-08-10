@@ -691,6 +691,55 @@ class site_cost_data:
     # ----------------------------------------------------------------- #
     # Sorting
     # ----------------------------------------------------------------- #
+    # The column each sortable heading actually orders on, by index.
+    SORT_INDEX = {"CD": 1, "CPO": 2, "Site Profit Share %": 3,
+                  "Electricity Unit Cost": 4, "Standing Charge": 5}
+
+    def _sort_values(self, col):
+        """Column `col` as comparable values, with unset cells as None.
+
+        Every sortable column here is either a number wrapped in currency or
+        percent decoration ("£0.22000", "15.00%", "£0.00000/day") or a name, so
+        each is reduced to the thing the server is really ordering on.
+        """
+        values = []
+        for cell in self._column(self.SORT_INDEX[col]):
+            cell = cell.strip()
+            if cell == self.UNSET:
+                values.append(None)
+            elif col == "CPO":
+                values.append(cell.casefold())
+            else:
+                found = re.search(r"[\d.]+", cell)
+                values.append(float(found.group()) if found else None)
+        return values
+
+    def _is_sorted(self, col, order):
+        """True once the rows on screen are ordered by `col`.
+
+        Sites whose terms have never been set carry an em dash rather than a
+        value; they are excluded rather than guessed at, because which end the
+        server groups them at is its own choice and not what this is checking.
+        """
+        known = [v for v in self._sort_values(col) if v is not None]
+        return bool(known) and known == sorted(known, reverse=(order == "desc"))
+
+    def _await_sorted(self, col, order, param):
+        """Wait for the refetch to land and prove it came back in order.
+
+        Checked on *sortedness* rather than on the order having changed. A
+        table that is already in the requested order is a legitimate result --
+        it happens whenever the default order and the sorted order coincide, or
+        whenever the estate is small enough that one column cannot separate the
+        rows -- and asserting "it must be different" turns that into a false
+        failure the day the data shrinks.
+        """
+        self._settled_names()
+        assert self._poll(lambda: self._is_sorted(col, order), timeout_ms=30000), (
+            f"sorting by {col!r} set sort_by={param}&sort_order={order} but the "
+            f"rows came back out of order: {self._sort_values(col)}"
+        )
+
     def sort_columns(self):
         """Every working sortable column reorders the table in both directions.
 
@@ -699,8 +748,6 @@ class site_cost_data:
         regression to a two-state toggle would be caught.
         """
         for col, param in self.SORTABLE.items():
-            baseline = self._settled_names()
-
             self._park_mouse()
             self._header(col).click()
             self.page.wait_for_url(
@@ -717,19 +764,7 @@ class site_cost_data:
                 f"the first click on {col!r} sorted {direction.group(1)}, "
                 "expected ascending"
             )
-            # Wait for the order to actually change before settling on it. The
-            # URL updates the moment the header is clicked, well before the
-            # refetch it triggered comes back, and the rows on screen at that
-            # point are still the previous ones -- already stable, so settling
-            # first would lock onto the pre-sort order and report a fault.
-            assert self._poll(
-                lambda b=baseline: self._names() and self._names() != b,
-                timeout_ms=30000,
-            ), (
-                f"sorting by {col!r} set sort_by={param}&sort_order=asc but the "
-                f"table came back in its original order: {self._names()[:4]}"
-            )
-            ascending = self._settled_names()
+            self._await_sorted(col, "asc", param)
 
             # Reverse it. Waiting on the *direction* rather than merely on
             # sort_by, which is already present from the first click and would
@@ -740,10 +775,7 @@ class site_cost_data:
             self.page.wait_for_url(
                 re.compile(r"[?&]sort_order=desc\b"), timeout=20000
             )
-            assert self._poll(
-                lambda a=ascending: self._names() and self._names() != a,
-                timeout_ms=25000,
-            ), f"reversing the {col!r} sort did not reorder the table"
+            self._await_sorted(col, "desc", param)
 
             # A third click drops the sort altogether.
             self._park_mouse()

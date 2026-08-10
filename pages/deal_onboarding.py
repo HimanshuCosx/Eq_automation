@@ -120,7 +120,10 @@ class deal_onboarding:
 
         # Empty state / footer
         self.empty_state = page.get_by_text(
-            "No deals found matching your criteria", exact=True
+            # The empty state was rewritten: it now leads with a heading and
+            # repeats the search term back underneath it, so it is matched on
+            # the heading rather than on the old single-sentence copy.
+            "No deals match your search", exact=True
         )
         self.showing = page.get_by_text(re.compile(r"^Showing "))
 
@@ -466,9 +469,15 @@ class deal_onboarding:
         assert self._poll(self._loaded, timeout_ms=20000), (
             f"the table did not repopulate under the {CPO!r} filter"
         )
-        expect(
-            self.page.get_by_role("button", name=f"CPO: {CPO}", exact=True)
-        ).to_be_visible()
+        # The applied value now shows inside the filter trigger itself ("CPO
+        # East of England CO OP") rather than on a separate "CPO: <value>"
+        # chip beside it, so the trigger is what proves the filter landed.
+        assert self._poll(
+            lambda: CPO in (self.cpo_filter.inner_text() or "")
+        ), (
+            f"the CPO trigger does not show {CPO!r}: "
+            f"{self.cpo_filter.inner_text()!r}"
+        )
         # Every surviving row really belongs to that CPO.
         self._await_column(2, CPO, "CPO")
         log.info("CPO filter %r -> %s deal(s)", CPO, self.rows.count())
@@ -496,11 +505,12 @@ class deal_onboarding:
         assert self._poll(self._loaded, timeout_ms=20000), (
             f"the table did not repopulate under the {DEAL_TYPE!r} filter"
         )
-        expect(
-            self.page.get_by_role(
-                "button", name=f"Deal Type: {DEAL_TYPE}", exact=True
-            )
-        ).to_be_visible()
+        assert self._poll(
+            lambda: DEAL_TYPE in (self.type_filter.inner_text() or "")
+        ), (
+            f"the deal-type trigger does not show {DEAL_TYPE!r}: "
+            f"{self.type_filter.inner_text()!r}"
+        )
         # The table abbreviates the type it was filtered on, so the rows are
         # checked against the short form the column actually renders.
         self._await_column(3, "O&M Onboarding", "deal-type")
@@ -529,11 +539,12 @@ class deal_onboarding:
         assert self._poll(self._loaded, timeout_ms=20000), (
             f"the table did not repopulate under the {CRITICALITY!r} filter"
         )
-        expect(
-            self.page.get_by_role(
-                "button", name=f"Criticality: {CRITICALITY}", exact=True
-            )
-        ).to_be_visible()
+        assert self._poll(
+            lambda: CRITICALITY in (self.criticality_filter.inner_text() or "")
+        ), (
+            f"the criticality trigger does not show {CRITICALITY!r}: "
+            f"{self.criticality_filter.inner_text()!r}"
+        )
         self._await_column(7, CRITICALITY, "criticality")
         log.info(
             "Criticality filter %r -> %s deal(s)", CRITICALITY, self.rows.count()
