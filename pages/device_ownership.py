@@ -47,6 +47,12 @@ class device_ownership:
         "Device", "Site", "Ownership", "Verified", "Sockets", "Created", "Actions",
     ]
 
+    # What the Verified column prints for an unverified device. Renamed from
+    # "Unverified" to "Not verified" (the filter option is still "Unverified
+    # only"); such rows also carry a "Verify" action, which is a write and is
+    # never clicked.
+    UNVERIFIED = "Not verified"
+
     # Sortable columns and the `sort_by` query parameter each one drives. The
     # page pushes the sort into the URL, so the parameter is the unambiguous
     # proof that the click reached the backend rather than just reshuffling
@@ -66,8 +72,10 @@ class device_ownership:
     def __init__(self, page):
         self.page = page
 
-        # Sidebar navigation
-        self.do_link = page.get_by_role("link", name="Device Ownership")
+        # Sidebar navigation. Exact, so an in-page "Open Device Ownership"
+        # style shortcut (as Command Center now has for Deal Onboarding) can
+        # never make this a strict-mode violation.
+        self.do_link = page.get_by_role("link", name="Device Ownership", exact=True)
         self.heading = page.locator("//h1[normalize-space()='Device Ownership']")
 
         # Search
@@ -155,10 +163,10 @@ class device_ownership:
         Sorting is asserted by watching this list change, which is engine- and
         locale-independent -- it never assumes a particular sort direction.
         """
-        return [
-            (r.locator("td").first.inner_text() or "").strip()
-            for r in self._data_rows().all()
-        ]
+        # One evaluate_all for the same stale-row reason as `_column_values`.
+        return self._data_rows().evaluate_all(
+            "rows => rows.map(r => (r.cells[0] ? r.cells[0].innerText : '').trim())"
+        )
 
     def _header(self, col):
         """The clickable column header cell for `col`."""
@@ -183,12 +191,20 @@ class device_ownership:
         return (row.locator("td").nth(self._column_index(col)).text_content() or "").strip()
 
     def _column_values(self, col):
-        """The `col` cell of every device row, top to bottom."""
+        """The `col` cell of every device row, top to bottom.
+
+        Read in a single evaluate_all rather than row by row: a filter or sort
+        refetch re-renders the table, and a row locator resolved before that
+        goes stale -- the next per-row inner_text() then waits out its full
+        30s timeout instead of returning (this is what failed right after the
+        "Unverified only" filter). One pass over the live rows cannot straddle
+        a repaint, and polling callers simply read again on the next tick.
+        """
         idx = self._column_index(col)
-        return [
-            (r.locator("td").nth(idx).inner_text() or "").strip()
-            for r in self._data_rows().all()
-        ]
+        return self._data_rows().evaluate_all(
+            "(rows, idx) => rows.map(r => (r.cells[idx] ? r.cells[idx].innerText : '').trim())",
+            idx,
+        )
 
     def _column_all_equal(self, col, expected):
         """True when every row's `col` cell is exactly `expected`.
@@ -280,13 +296,13 @@ class device_ownership:
         return value if value in ("Owned", "Managed") else None
 
     def _only_unverified_listed(self):
-        """True when the Verified column reads "Unverified" on every row.
+        """True when the Verified column reads UNVERIFIED on every row.
 
-        Read from the Verified column rather than the row text: "Unverified"
-        contains "Verified", so a row-text check is easy to get backwards. An
-        empty list counts as true.
+        Read from the Verified column rather than the row text: the unverified
+        label and "Verified" overlap as substrings, so a row-text check is easy
+        to get backwards. An empty list counts as true.
         """
-        return self._column_all_equal("Verified", "Unverified")
+        return self._column_all_equal("Verified", self.UNVERIFIED)
 
     def _clear_search(self):
         """Empty the search box via its Clear button, falling back to a fill."""
@@ -459,6 +475,46 @@ class device_ownership:
         """Apply the CPO, verification and Site filters, then clear them all."""
         before = self._data_rows().count()
 
+        log.info("Filtering by verification status (Unverified only, then All)")
+        self.verified_filter.click()
+        self.page.wait_for_timeout(600)
+        self.opt_unverified.click()
+        # The trigger relabels to carry the selected value -- that is the proof
+        # the filter applied. It keeps its "Verified" label alongside it, so the
+        # value is checked inside the same control rather than as a bare button.
+        unverified_trigger = self.verified_filter
+        assert self._poll(
+            lambda: "Unverified only" in (unverified_trigger.inner_text() or "")
+        ), (
+            "the Verified trigger does not show the applied value: "
+            f"{unverified_trigger.inner_text()!r}"
+        )
+        # The trigger relabels as soon as the click lands, but the table only
+        # updates when the refetch comes back -- so poll for the *rows* to agree
+        # with the filter rather than reading them straight away, or the stale
+        # pre-filter rows get asserted against. Run on the unfiltered list:
+        # scoped to a single CPO it usually matched nothing, which made the
+        # column check vacuous (it never noticed the label rename). An empty
+        # result is still tolerated -- it is data, not a fault.
+        assert self._poll(self._only_unverified_listed, timeout_ms=10000), (
+            "the 'Unverified only' filter still lists a device whose Verified "
+            f"column is not {self.UNVERIFIED!r} -> "
+            f"{self._column_values('Verified')[:3]}"
+        )
+        log.info("Unverified only shows %s device(s)", self._data_rows().count())
+        if self._data_rows().count():
+            self._assert_column("Verified", self.UNVERIFIED, "Unverified only filter")
+
+        unverified_trigger.click()
+        self.page.wait_for_timeout(600)
+        self.opt_all.click()
+        expect(self.verified_filter).to_be_visible()
+        assert self._poll(lambda: self._data_rows().count() == before,
+                          timeout_ms=10000), (
+            f"expected {before} device(s) back on the 'All' verification "
+            f"filter, got {self._data_rows().count()}"
+        )
+
         log.info("Filtering by CPO %r", CPO)
         self.cpo_filter.click()
         self.page.wait_for_timeout(600)
@@ -479,45 +535,6 @@ class device_ownership:
             assert value in ("Owned", "Managed"), (
                 f"the CPO filter left an unreadable Ownership cell: {value!r}"
             )
-
-        cpo_filtered = self._data_rows().count()
-
-        log.info("Filtering by verification status (Unverified only, then All)")
-        self.verified_filter.click()
-        self.page.wait_for_timeout(600)
-        self.opt_unverified.click()
-        # The trigger relabels to carry the selected value -- that is the proof
-        # the filter applied. It keeps its "Verified" label alongside it, so the
-        # value is checked inside the same control rather than as a bare button.
-        unverified_trigger = self.verified_filter
-        assert self._poll(
-            lambda: "Unverified only" in (unverified_trigger.inner_text() or "")
-        ), (
-            "the Verified trigger does not show the applied value: "
-            f"{unverified_trigger.inner_text()!r}"
-        )
-        # The trigger relabels as soon as the click lands, but the table only
-        # updates when the refetch comes back -- so poll for the *rows* to agree
-        # with the filter rather than reading them straight away, or the stale
-        # pre-filter rows get asserted against. Staging usually has every device
-        # verified, so an empty list is a legitimate (and common) result.
-        assert self._poll(self._only_unverified_listed, timeout_ms=10000), (
-            "the 'Unverified only' filter still lists a device whose Verified "
-            f"column is not 'Unverified' -> {self._column_values('Verified')[:3]}"
-        )
-        log.info("Unverified only shows %s device(s)", self._data_rows().count())
-        if self._data_rows().count():
-            self._assert_column("Verified", "Unverified", "Unverified only filter")
-
-        unverified_trigger.click()
-        self.page.wait_for_timeout(600)
-        self.opt_all.click()
-        expect(self.verified_filter).to_be_visible()
-        assert self._poll(lambda: self._data_rows().count() == cpo_filtered,
-                          timeout_ms=10000), (
-            f"expected {cpo_filtered} device(s) back on the 'All' verification "
-            f"filter, got {self._data_rows().count()}"
-        )
 
         log.info("Clearing all filters")
         self.clear_all_filters.click()

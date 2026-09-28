@@ -8,12 +8,13 @@ from pages.operations_hub import operations_hub
 @allure.story("Operations Hub page workflow")
 @allure.severity(allure.severity_level.CRITICAL)
 @allure.title(
-    "Operations Hub: CPO and Sites list views (columns, search, sorting, "
-    "pagination), CPO drill-down with filters and row expansion, site detail "
-    "(Site Info / Tracker / Records categories / Maintenance: sub-tabs, plan "
-    "cards, creating a maintenance plan and an event, and an edit-and-restore "
-    "round trip), breadcrumb navigation, and the Map View (legend, markers, "
-    "filters, zoom)"
+    "Operations Hub: CPO list (columns, CPO/site search, sorting, pagination, "
+    "CPO / Deal Type / Status / Criticality filters), in-place CPO -> site -> "
+    "panel row expansion and Expand/Collapse all, site detail (Site Info / "
+    "Tracker / Records categories), the CPO sites page (filters, row expansion) "
+    "and its Maintenance panel (sub-tabs, plan cards, and the Create Plan / "
+    "Edit Plan / Create Event forms, validated and never submitted), "
+    "breadcrumb navigation, and the Map View (legend, markers, filters, zoom)"
 )
 @pytest.mark.smoke
 def test_operations_hub(page):

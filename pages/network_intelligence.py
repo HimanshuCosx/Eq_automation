@@ -1,15 +1,16 @@
 import logging
 import re
 import time
+from datetime import datetime
 
 from playwright.sync_api import expect
 
-log = logging.getLogger("eq_automation.network_health")
+log = logging.getLogger("eq_automation.network_intelligence")
 
 # The sub-organisation the filter check is pinned to. Larkfleet owns exactly
-# one of the handful of sites that have monitoring coverage on staging, so
-# applying it collapses the Sites table to a single row -- a change large
-# enough to be unambiguous and small enough to verify row by row.
+# one of the sites that have monitoring coverage on staging, so applying it
+# collapses the Sites table to a single row -- a change large enough to be
+# unambiguous and small enough to verify row by row.
 SUB_ORG = "Larkfleet"
 
 # The search check reuses it: the term matches that site by name, which proves
@@ -23,24 +24,40 @@ NO_MATCH = "zzzz-no-such-site"
 DEFAULT_RANGE = "Last 30 days"
 OTHER_RANGE = "Last 7 days"
 
+# The alert filter checks: a severity to narrow the history to, a status that
+# no Critical episode carries on staging (to reach the empty state), and a
+# detector reached through the Detector filter's own search box.
+ALERT_SEVERITY = "Critical"
+ALERT_EMPTY_STATUS = "Suppressed"
+ALERT_DETECTOR = "Reboot frequency"
+ALERT_DETECTOR_QUERY = "reboot"
 
-class network_health:
-    """Network Health (/operations/network-health).
 
-    The diagnostic view of the estate, one level below Network Status: eight
-    KPI tiles over a chosen date range, a trend section, a reliability section
-    that accounts for every observed EVSE minute, a ranked at-risk charger
-    watchlist, a site coverage table that expands into its chargers, and an
-    alert history with its own filters. Sites and chargers each have their own
-    page underneath this one.
+class network_intelligence:
+    """Network Intelligence (/operations/network-intelligence).
+
+    The diagnostic view of the estate, listed under AI & Analytics in the
+    sidebar. It replaced Network Health, which now 404s: the same backend
+    (`/api/v1/network-health/*`), with period-over-period deltas on the tiles,
+    a site-scope selector on the coverage table, a watchlist that links to each
+    charger, and an alert history that is now populated and expands into the
+    detector's evidence.
+
+    The page has eight KPI tiles over a chosen date range, a trend section, a
+    reliability section that accounts for every observed EVSE minute, a ranked
+    at-risk charger watchlist, a site coverage table that expands into its
+    chargers, and an alert history with its own filters and pager. Sites and
+    chargers each have their own page underneath this one.
 
     The workflow is entirely read-only -- the page creates, edits and deletes
     nothing -- so it always leaves staging exactly as it found it. It exercises
-    every control: all eight tiles and their tooltips, both trend charts, all
-    four reliability panels, the watchlist with its per-charger score
-    explainer and its expand toggle, the sites table with search, expansion
-    and pagination, the sub-organisation filter (applied and cleared), the
-    date-range presets, the three alert filters, and the site and charger
+    every control: the refresh button, all eight tiles with their deltas and
+    tooltips, both trend charts, all four reliability panels, the watchlist
+    with its per-charger score explainer, its expand toggle and its charger
+    links, the sites table with its scope selector, search, expansion and
+    pagination, the sub-organisation filter (applied and cleared), the
+    date-range presets and the custom calendar, the three alert filters with
+    their empty state, alert expansion and paging, and the site and charger
     pages reached from the table.
     """
 
@@ -49,9 +66,12 @@ class network_health:
     # uppercase by CSS but sit in the DOM in title case, so they are read from
     # the rendered text rather than matched as DOM strings.
     PERCENT = r"\d[\d,]*\.\d{2}%"
+    # An uptime cell. Where monitoring missed part of the window, the share
+    # it did observe is stated underneath -- the uptime is only as good as it.
+    UPTIME_CELL = rf"{PERCENT}(\n{PERCENT} coverage)?"
     TILES = {
         "FLEET UPTIME": (PERCENT, "averaged across every charger in scope"),
-        "COVERAGE": (PERCENT, "Share of the window we actually observed"),
+        "SERVICEABLE": (PERCENT, "a driver could actually have used"),
         "OCCUPIED": (PERCENT, "plugged-in car drawing no power"),
         "CHARGING": (PERCENT, "actually delivering energy"),
         "FAULT HOURS": (r"\d", "fault state over the range"),
@@ -81,8 +101,31 @@ class network_health:
     FUNNEL_STAGES = ["Auth attempts", "Authorised",
                      "Sessions with measured energy", "Energy delivered"]
 
-    # The bands a watchlist score can carry, worst first.
-    RISK_BANDS = ["Critical", "Elevated", "Watch", "Stable"]
+    # The bands a watchlist score can carry, worst first. The watchlist only
+    # shows the at-risk end; a charger page can carry any of them.
+    RISK_BANDS = ["Critical", "Elevated", "Watch", "Normal", "Stable"]
+
+    # Each tile's comparison against the previous period of the same length.
+    # Rates move in percentage points; counts and durations in percent.
+    DELTA_POINTS = r"\d[\d,]*\.\d pts"
+    DELTA_PERCENT = r"\d[\d,]*\.\d%"
+    TILE_DELTAS = {
+        "FLEET UPTIME": DELTA_POINTS,
+        "SERVICEABLE": DELTA_POINTS,
+        "OCCUPIED": DELTA_POINTS,
+        "CHARGING": DELTA_POINTS,
+        "FAULT HOURS": DELTA_PERCENT,
+        "0-KWH RATE": DELTA_POINTS,
+        "REBOOTS": DELTA_PERCENT,
+        "AUTH-DENIAL RATE": DELTA_POINTS,
+    }
+
+    # What a page says instead of deltas when there is nothing to compare to.
+    NO_COMPARISON = "No OCPP data was observed in the comparison window"
+
+    # The coverage table's two scopes. The second carries a live count.
+    SCOPE_COVERED = "Sites with coverage"
+    SCOPE_ALL = "All sites"
 
     # The Sites table's column set. The first column holds the row expander and
     # the last the row's link, so both are matched loosely; the Site heading
@@ -125,14 +168,25 @@ class network_health:
         "Status": ["Open", "Resolved", "Suppressed", "Expired"],
     }
 
+    # What each alert filter's trigger reads while nothing is chosen.
+    ALERT_DEFAULTS = {
+        "Detector": "All detectors",
+        "Severity": "All severities",
+        "Status": "All statuses",
+    }
+
     def __init__(self, page):
         self.page = page
 
         # Sidebar navigation. The breadcrumb carries the same link name, so
         # this is anchored on the first match -- the sidebar renders before
         # the page content.
-        self.nh_link = page.get_by_role("link", name="Network Health").first
-        self.heading = page.locator("//h1[normalize-space()='Network Health']")
+        self.ni_link = page.get_by_role(
+            "link", name="Network Intelligence"
+        ).first
+        self.heading = page.locator(
+            "//h1[normalize-space()='Network Intelligence']"
+        )
         self.refresh = page.get_by_role("button", name="Refresh data")
 
         # Page-level filters
@@ -157,8 +211,16 @@ class network_health:
         self.open_network_status = page.get_by_role(
             "link", name="Open Network Status"
         )
+        # Each card links to its charger's page twice over: the model name and
+        # a trailing "Open <model>" chevron.
+        self.watchlist_open = page.get_by_role(
+            "link", name=re.compile(r"^Open (?!Network Status$).+")
+        )
 
         # Sites section
+        self.scope_filter = page.get_by_role(
+            "button", name=re.compile(r"^Coverage\b")
+        )
         self.search = page.get_by_placeholder(
             re.compile(r"^Search sites, chargers")
         )
@@ -177,21 +239,46 @@ class network_health:
         self.empty_state = page.get_by_text("No sites found", exact=True)
         self.empty_clear = page.get_by_role("button", name="Clear filters")
 
-        # Pagination
+        # Pagination. The sites table and the alert history each carry a
+        # pager, sites first, so the two are told apart by position.
         self.page_size = page.get_by_role(
             "button", name=re.compile(r"^(10|25|50|100)$")
         )
-        self.next_page = page.get_by_role("button", name="Go to next page")
-        self.prev_page = page.get_by_role("button", name="Go to previous page")
+        self.next_page = page.get_by_role(
+            "button", name="Go to next page"
+        ).first
+        self.prev_page = page.get_by_role(
+            "button", name="Go to previous page"
+        ).first
+        self.alert_next = page.get_by_role(
+            "button", name="Go to next page"
+        ).last
+        self.alert_prev = page.get_by_role(
+            "button", name="Go to previous page"
+        ).last
+
+        # Alert history. Each episode is a disclosure button; the filter
+        # triggers are disclosures too, so rows are told apart by the
+        # "Opened <date>" line only an episode carries.
+        self.alert_rows = page.locator("button[aria-expanded]").filter(
+            has_text=re.compile(r"Opened \d")
+        )
+        self.alert_empty = page.get_by_text(
+            "No alerts match these filters", exact=True
+        )
 
         # Detail pages
         self.back_link = page.get_by_role("link", name=re.compile(r"^Back to "))
         # Scoped to the breadcrumb: the sidebar carries a link of the same
         # name, so an unscoped lookup resolves to two.
         self.breadcrumb = page.get_by_label("Breadcrumb")
-        self.breadcrumb_nh = self.breadcrumb.get_by_role(
-            "link", name="Network Health", exact=True
+        self.breadcrumb_ni = self.breadcrumb.get_by_role(
+            "link", name="Network Intelligence", exact=True
         )
+
+        # The fleet size the watchlist ranks against, read from its cards and
+        # cross-checked on the charger page.
+        self.scored_fleet = None
 
     # ----------------------------------------------------------------- #
     # Helpers
@@ -369,6 +456,26 @@ class network_health:
             self.page.wait_for_timeout(400)
         return self._names()
 
+    def _wait_for_charger_page(self, model):
+        """Wait for a charger page to finish rendering, however it was reached.
+
+        The trend card and the connector table arrive on their own fetches,
+        after the tiles. Reading the page before both have landed sees a chart
+        with no granularity toggle and no connector section at all.
+        """
+        assert self._poll(self._tiles_loaded, timeout_ms=40000), (
+            f"the KPI tiles on {model!r} never loaded"
+        )
+        assert self._poll(
+            lambda: "CONNECTORS" in self._body() and "Daily" in self._body()
+                    and "Risk score" in self._body(),
+            timeout_ms=40000,
+        ), (
+            f"the charger page for {model!r} never finished rendering its "
+            f"trend, risk score and connectors"
+        )
+        self._park_mouse()
+
     def _headers(self, table=None):
         table = table if table is not None else self.table
         return [
@@ -391,10 +498,17 @@ class network_health:
     # Open
     # ----------------------------------------------------------------- #
     def open_page(self):
-        log.info("Opening Network Health")
-        self.nh_link.click()
+        # Filters, scope and alert choices live in component state, so a run
+        # that is already here (say, after a failed test) routes away first to
+        # start from the page's defaults.
+        if "/operations/network-intelligence" in self.page.url:
+            self.page.get_by_role("link", name="Command Center").click()
+            self.page.wait_for_url(re.compile(r"/operations/overview"),
+                                   timeout=20000)
+        log.info("Opening Network Intelligence")
+        self.ni_link.click()
         self.page.wait_for_url(
-            re.compile(r"/operations/network-health"), timeout=20000
+            re.compile(r"/operations/network-intelligence"), timeout=20000
         )
         self.heading.wait_for(state="visible", timeout=20000)
         assert self._poll(self._loaded, timeout_ms=60000), (
@@ -410,7 +524,8 @@ class network_health:
         # the link focused, which does the same again on the first key press.
         self._park_mouse()
         self._blur()
-        log.info("Network Health loaded with %s site row(s)", self.rows.count())
+        log.info("Network Intelligence loaded with %s site row(s)",
+                 self.rows.count())
 
     def check_header(self):
         """The page names itself, its data cut-off and every section."""
@@ -453,6 +568,53 @@ class network_health:
             )
             log.info("Tile %-18s -> %s", label, value[:60])
 
+    def check_refresh(self):
+        """The data-freshness stamp is also a button that refetches the page.
+
+        Asserted on the request rather than on the numbers: a refresh against
+        unchanged data repaints identical values, so the only honest evidence
+        that it did anything is the KPI call it sends.
+        """
+        stamp = (self.refresh.inner_text() or "").strip()
+        log.info("Refreshing the page data (%s)", stamp)
+        self._park_mouse()
+        with self.page.expect_response(
+            lambda r: "/network-health/kpis" in r.url, timeout=30000
+        ) as response:
+            self.refresh.click()
+        assert response.value.ok, (
+            f"the refresh's KPI call failed with HTTP {response.value.status}"
+        )
+        assert self._poll(self._tiles_loaded, timeout_ms=40000), (
+            "the KPI tiles never repainted after the refresh"
+        )
+        assert self._poll(self._loaded, timeout_ms=40000), (
+            "the coverage table never repainted after the refresh"
+        )
+        self._blur()
+        log.info("Refresh refetched the KPIs (HTTP %s)", response.value.status)
+
+    def check_kpi_deltas(self):
+        """Each tile compares itself with the previous period of equal length.
+
+        Rates move in percentage points and counts in percent, and mixing the
+        two up is exactly the kind of slip that still reads plausibly, so each
+        tile is held to its own unit. Where there is no earlier data to compare
+        with, the page has to say so rather than show a delta against zero.
+        """
+        if self.NO_COMPARISON in self._body():
+            log.info("No comparison window on this page -- deltas are "
+                     "withheld, and the page says so")
+            return
+        for index, (label, pattern) in enumerate(self.TILE_DELTAS.items()):
+            text = self._tile_text(index, label)
+            match = re.search(pattern, text)
+            assert match, (
+                f"the {label} tile shows no delta of the shape {pattern!r}: "
+                f"{text!r}"
+            )
+            log.info("Delta %-18s -> %s", label, match.group(0))
+
     def check_tile_tooltips(self):
         """Each tile's info icon explains what that tile measures."""
         tooltip = self.page.get_by_role("tooltip")
@@ -490,6 +652,17 @@ class network_health:
         # chart left on a stale range is caught.
         span = re.search(r"\d{1,2} \w{3} – \d{1,2} \w{3}", trend)
         assert span, f"the trend chart states no date span: {trend[:200]!r}"
+        # The ingestion-gap band only appears when the range overlaps a known
+        # OCPP outage; when it does, the funnel has to own up to it too.
+        if "Ingestion gap" in trend:
+            assert "ingestion gap" in self._section(
+                "RELIABILITY", length=4000
+            ), (
+                "the trend marks an ingestion gap but the session funnel does "
+                "not warn that its counters under-count across it"
+            )
+            log.info("The range overlaps an OCPP ingestion gap, and the "
+                     "session funnel says so")
         log.info("Network trend covers %s with %s series",
                  span.group(0), len(self.TREND_SERIES))
 
@@ -670,6 +843,24 @@ class network_health:
         bands = set(re.findall(r"|".join(self.RISK_BANDS), section))
         assert bands, f"no charger carries a risk band: {section[:400]!r}"
 
+        # Each card restates its rank against the whole scored fleet, which
+        # has to agree with the "#n" it is drawn under.
+        cards = re.findall(r"#(\d+)\n.*?\nRank (\d+) of (\d+)\n", section,
+                           flags=re.S)
+        assert len(cards) == count, (
+            f"{count} chargers are ranked but {len(cards)} card(s) state a "
+            f"rank line: {cards}"
+        )
+        for badge, rank, _ in cards:
+            assert badge == rank, (
+                f"card #{badge} claims to be rank {rank}"
+            )
+        fleet = {int(of) for _, _, of in cards}
+        assert len(fleet) == 1, (
+            f"the cards disagree on the size of the scored fleet: {fleet}"
+        )
+        self.scored_fleet = fleet.pop()
+
         footer = re.search(r"Showing (\d+) of (\d+) scored chargers", section)
         assert footer, f"the watchlist has no footer count: {section[-400:]!r}"
         assert int(footer.group(1)) == count, (
@@ -761,6 +952,74 @@ class network_health:
             f"{self.score_buttons.count()}"
         )
 
+    def open_watchlist_charger(self):
+        """The worst-ranked charger links to its own page, which agrees.
+
+        The watchlist and the charger page compute the score separately, so
+        this cross-checks them: the charger page must restate the same score,
+        the same rank and the same fleet size the watchlist card showed.
+        """
+        button = self.score_buttons.first
+        model = re.search(
+            r"^Why is (.+) ranked 1$", button.get_attribute("aria-label")
+        ).group(1)
+        score = int((button.inner_text() or "0").strip())
+
+        link = self.watchlist_open.first
+        href = link.get_attribute("href") or ""
+        assert re.search(
+            r"/operations/network-intelligence/[0-9a-f-]{36}/[0-9a-f-]{36}$",
+            href,
+        ), f"the watchlist card does not link to a charger page: {href!r}"
+        expect(link).to_have_accessible_name(f"Open {model}")
+
+        log.info("Opening the #1 watchlist charger %r (score %s)", model, score)
+        self._park_mouse()
+        link.scroll_into_view_if_needed()
+        link.click()
+        self.page.wait_for_url(re.compile(re.escape(href) + "$"),
+                               timeout=30000)
+        self._wait_for_charger_page(model)
+
+        body = self._body()
+        risk = re.search(
+            r"Risk score\n.*?\n(\d+)\n(\w+)\nrank (\d+) of (\d+)", body
+        )
+        assert risk, (
+            f"the charger page shows no risk score: "
+            f"{body[body.find('Risk score'):][:200]!r}"
+        )
+        assert int(risk.group(1)) == score, (
+            f"the watchlist scores {model!r} at {score} but its page says "
+            f"{risk.group(1)}"
+        )
+        assert risk.group(2) in self.RISK_BANDS, (
+            f"the charger page shows an unknown band {risk.group(2)!r}"
+        )
+        assert int(risk.group(3)) == 1, (
+            f"the watchlist's #1 charger is rank {risk.group(3)} on its page"
+        )
+        assert int(risk.group(4)) == self.scored_fleet, (
+            f"the watchlist ranks against {self.scored_fleet} chargers but the "
+            f"charger page against {risk.group(4)}"
+        )
+        log.info("Charger page agrees: %s %s, rank 1 of %s",
+                 score, risk.group(2), risk.group(4))
+
+        log.info("Returning to Network Intelligence through the breadcrumb")
+        self._park_mouse()
+        self.breadcrumb_ni.click()
+        self.page.wait_for_url(
+            re.compile(r"/operations/network-intelligence(\?|$)"),
+            timeout=30000,
+        )
+        assert self._poll(self._loaded, timeout_ms=60000), (
+            "the coverage table never reloaded after the breadcrumb"
+        )
+        assert self._poll(self._tiles_loaded, timeout_ms=60000)
+        self._park_mouse()
+        self._blur()
+
     # ----------------------------------------------------------------- #
     # Sites table
     # ----------------------------------------------------------------- #
@@ -791,7 +1050,7 @@ class network_health:
                 f"{name.splitlines()[0]!r} shows a non-numeric charger count: "
                 f"{cells[3]!r}"
             )
-            assert re.fullmatch(self.PERCENT, cells[4]), (
+            assert re.fullmatch(self.UPTIME_CELL, cells[4]), (
                 f"{name.splitlines()[0]!r} shows an unreadable uptime: "
                 f"{cells[4]!r}"
             )
@@ -811,6 +1070,64 @@ class network_health:
                 f"{cells[7]!r}"
             )
         log.info("Sites table shows %s of %s site(s)", self.rows.count(), total)
+
+    def check_coverage_scope(self):
+        """The scope selector widens the table from covered sites to all.
+
+        The page opens on sites with monitoring coverage. "All sites" adds the
+        ones without, so it must count at least as many -- and restoring the
+        default must bring the original rows back.
+        """
+        expect(self.scope_filter).to_contain_text(self.SCOPE_COVERED)
+        covered = self._site_count()
+        before = self._settled_names()
+
+        log.info("Opening the coverage scope selector (%s site(s))", covered)
+        self._park_mouse()
+        self.scope_filter.click()
+        options = self.page.get_by_role("option")
+        assert self._poll(lambda: options.count() == 2, timeout_ms=10000), (
+            f"the scope selector offers {options.all_inner_texts()}"
+        )
+        listed = [o.strip() for o in options.all_inner_texts()]
+        assert listed[0] == self.SCOPE_COVERED, (
+            f"the first scope is {listed[0]!r}, not {self.SCOPE_COVERED!r}"
+        )
+        expect(options.first).to_have_attribute("aria-selected", "true")
+        everything = re.fullmatch(rf"{self.SCOPE_ALL} \((\d+)\)", listed[1])
+        assert everything, f"the second scope reads {listed[1]!r}"
+        total = int(everything.group(1))
+        assert total >= covered, (
+            f"'All sites' counts {total}, fewer than the {covered} covered"
+        )
+
+        log.info("Switching the scope to %r", listed[1])
+        options.nth(1).click()
+        assert self._poll(lambda: self._site_count() == total,
+                          timeout_ms=30000), (
+            f"the Site header counts {self._site_count()} under {listed[1]!r}"
+        )
+        expect(self.scope_filter).to_contain_text(listed[1])
+        assert self._poll(
+            lambda: re.search(rf"Showing \d+[–-]\d+ of {total}\b",
+                              self._body()),
+            timeout_ms=20000,
+        ), "the pager footer does not follow the wider scope"
+        log.info("All sites -> %s site(s), %s without coverage",
+                 total, total - covered)
+
+        log.info("Restoring the scope to %r", self.SCOPE_COVERED)
+        self._park_mouse()
+        self.scope_filter.click()
+        self.page.get_by_role("option", name=self.SCOPE_COVERED).click()
+        assert self._poll(lambda: self._site_count() == covered,
+                          timeout_ms=30000), (
+            f"restoring the scope left {self._site_count()} site(s), not "
+            f"{covered}"
+        )
+        assert self._poll(lambda: self._names() == before, timeout_ms=25000), (
+            "restoring the scope did not bring the original rows back"
+        )
 
     def search_sites(self):
         """Search narrows the table, and a no-match query shows the empty state."""
@@ -992,6 +1309,63 @@ class network_health:
             timeout_ms=20000,
         ), "the range was not restored"
         assert self._poll(self._loaded, timeout_ms=40000)
+        self.check_custom_range()
+
+    def check_custom_range(self):
+        """"Custom" opens a two-date calendar that cannot run into the future.
+
+        Opened and dismissed without choosing dates: the point is that the
+        calendar is there and bounded, and that walking away from it leaves
+        the applied range alone.
+        """
+        url = self.page.url
+        log.info("Opening the Custom range calendar")
+        self._park_mouse()
+        self.date_filter.click()
+        self.page.wait_for_timeout(1200)
+        popover = self.page.get_by_role("dialog").last
+        popover.get_by_role("button", name=re.compile(r"^Custom\b")).click()
+        calendar = popover.get_by_role("grid")
+        assert self._poll(lambda: calendar.count() > 0, timeout_ms=10000), (
+            "choosing Custom opened no calendar"
+        )
+        # The field labels wrap onto two lines, so whitespace is normalised.
+        text = " ".join((popover.inner_text() or "").split())
+        for field in ("Start Date", "End Date"):
+            assert field in text, f"the custom range has no {field!r} field"
+        assert "Date Range: Select dates" in text, (
+            f"the calendar does not prompt for a range: {text[-80:]!r}"
+        )
+        for control in ("Clear", "Done"):
+            expect(popover.get_by_role("button", name=control,
+                                       exact=True)).to_be_visible()
+        # Two months side by side, ending on the current one. The data never
+        # runs past today, so neither may the calendar.
+        assert calendar.count() == 2, (
+            f"the custom range shows {calendar.count()} month(s), not two"
+        )
+        for button in popover.get_by_role("button", name="Next month").all():
+            expect(button).to_be_disabled()
+        expect(popover.get_by_role(
+            "button", name="Previous month"
+        ).first).to_be_enabled()
+        log.info("Custom calendar open on %s",
+                 " and ".join(c.get_attribute("aria-label")
+                              for c in calendar.all()))
+
+        self.page.keyboard.press("Escape")
+        self._blur()
+        assert self._poll(
+            lambda: self.page.get_by_role("dialog").count() == 0,
+            timeout_ms=8000,
+        ), "the range picker did not close"
+        assert (self.date_filter.inner_text() or "").strip() == DEFAULT_RANGE, (
+            f"dismissing the calendar changed the range to "
+            f"{self.date_filter.inner_text()!r}"
+        )
+        assert self.page.url == url, (
+            f"dismissing the calendar changed the URL to {self.page.url}"
+        )
 
     def expand_site_row(self):
         """Expand a site into its chargers, then collapse it again.
@@ -1107,11 +1481,17 @@ class network_health:
             lambda: (self.page_size.first.inner_text() or "").strip() == target,
             timeout_ms=20000,
         ), "the page size was not applied"
-        assert self._poll(self._loaded, timeout_ms=30000), (
-            f"the table never reloaded at page size {target}"
-        )
-
+        # The trigger relabels before the refetch lands, and the old page is
+        # already stable -- so wait for the row count the new size implies.
         total = self._site_count()
+        expected = min(int(target), total)
+        assert self._poll(
+            lambda: self._loaded() and self.rows.count() == expected,
+            timeout_ms=30000,
+        ), (
+            f"the table never reloaded at page size {target}: "
+            f"{self.rows.count()} row(s), expected {expected}"
+        )
         footer = re.search(
             r"Showing (\d+)[–-](\d+) of (\d+)", self._body()
         )
@@ -1153,25 +1533,109 @@ class network_health:
             lambda: (self.page_size.first.inner_text() or "").strip() == current,
             timeout_ms=20000,
         ), "the page size was not restored"
+        assert self._poll(
+            lambda: self._loaded()
+                    and self.rows.count() == min(int(current), total),
+            timeout_ms=30000,
+        ), f"the table never reloaded at page size {current}"
 
     # ----------------------------------------------------------------- #
     # Alerts
     # ----------------------------------------------------------------- #
-    def check_alerts_section(self):
-        """The alert history offers its three filters and states its scope.
+    def _alerts(self):
+        """Every episode on the current alert page, parsed, in one read.
 
-        Staging carries no alert episodes, so the list itself is empty. That is
-        checked as a real empty state rather than skipped: the panel is
-        required to say *why* it is empty, and specifically to warn that an
-        empty list is not evidence that monitoring is running.
+        Read with a single `evaluate_all` so a refetch landing mid-read cannot
+        pair one episode's status with another's dates. Each episode renders
+        seven lines: detector, subject, severity, status, opened, resolved and
+        duration. Returns [] while the list is repainting.
         """
-        section = self._section("ALERTS", length=1500)
+        try:
+            texts = self.alert_rows.evaluate_all(
+                "els => els.map(e => e.innerText)"
+            )
+        except Exception:
+            return []
+        alerts = []
+        for text in texts:
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            if len(lines) != 7:
+                return []
+            keys = ("detector", "subject", "severity", "status", "opened",
+                    "resolved", "duration")
+            alerts.append(dict(zip(keys, lines)))
+        return alerts
+
+    @staticmethod
+    def _stamp(text, prefix):
+        """Parse "Opened 28 Sep 2026, 09:30" (or "Resolved ...") to a datetime."""
+        return datetime.strptime(text[len(prefix):].strip(), "%d %b %Y, %H:%M")
+
+    @staticmethod
+    def _minutes(duration):
+        """Parse a duration such as "1d 4h 19m" into minutes."""
+        match = re.fullmatch(r"(?:(\d+)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?",
+                             duration)
+        assert match and duration, f"unreadable duration {duration!r}"
+        d, h, m = (int(g or 0) for g in match.groups())
+        return d * 1440 + h * 60 + m
+
+    def _alert_filter(self, label):
+        return self.page.get_by_role(
+            "button", name=re.compile(rf"^{re.escape(label)}\b")
+        ).last
+
+    def _pick_alert_option(self, label, option, query=None):
+        """Choose one option in an alert filter. It applies on the click."""
+        self._park_mouse()
+        self._alert_filter(label).click()
+        assert self._poll(
+            lambda: self.page.get_by_role("option").count() > 0,
+            timeout_ms=10000,
+        ), f"the {label!r} filter opened with no options"
+        if query is not None:
+            self.page.get_by_role("dialog").last.get_by_role(
+                "textbox"
+            ).fill(query)
+            self.page.wait_for_timeout(600)
+        choice = self.page.get_by_role("option", name=option, exact=True)
+        deselecting = choice.get_attribute("aria-selected") == "true"
+        choice.click()
+        if deselecting:
+            # Choosing the active option again clears the filter, but leaves
+            # the popover open.
+            expect(choice).not_to_have_attribute("aria-selected", "true")
+            self.page.keyboard.press("Escape")
+            self._blur()
+        # Single-select: a new choice closes the popover and applies at once.
+        assert self._poll(
+            lambda: self.page.get_by_role("dialog").count() == 0,
+            timeout_ms=8000,
+        ), f"the {label!r} filter stayed open after choosing {option!r}"
+
+    def _settled_alerts(self, timeout_ms=15000):
+        """The alert page, once two consecutive reads agree."""
+        previous = None
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            current = self._alerts()
+            if current and current == previous:
+                return current
+            previous = current
+            self.page.wait_for_timeout(400)
+        return self._alerts()
+
+    def check_alert_filters(self):
+        """The alert history offers its three filters, each with its options."""
+        section = self._section("ALERTS", length=600)
         assert "Alert history" in section, "the alert panel has no title"
+        assert "fleet-wide" in section, (
+            "the alert history does not state its scope"
+        )
 
         for label, options in self.ALERT_FILTERS.items():
-            trigger = self.page.get_by_role(
-                "button", name=re.compile(rf"^{re.escape(label)}\b")
-            ).last
+            trigger = self._alert_filter(label)
+            expect(trigger).to_contain_text(self.ALERT_DEFAULTS[label])
             log.info("Opening the %r alert filter", label)
             self._park_mouse()
             trigger.click()
@@ -1188,17 +1652,281 @@ class network_health:
             )
             log.info("Filter %-8s -> %s option(s)", label, len(listed))
             self.page.keyboard.press("Escape")
+            self._blur()
             self.page.wait_for_timeout(700)
 
-        assert "No alerts in range" in section, (
-            f"staging has no alert episodes, so the panel should say so: "
-            f"{section!r}"
+    def check_alert_rows(self):
+        """Each episode is well formed, internally consistent and newest first.
+
+        Status and dates have to agree: an open episode is unresolved and
+        ongoing, a resolved one ends after it began and states a duration that
+        matches the gap between the two.
+        """
+        assert self._poll(lambda: self._alerts(), timeout_ms=30000), (
+            "the alert history never listed an episode"
         )
-        assert "does not confirm ongoing monitoring is active" in section, (
-            f"the empty state does not warn that it is not proof of "
-            f"monitoring: {section!r}"
+        alerts = self._settled_alerts()
+        severities = self.ALERT_FILTERS["Severity"]
+        statuses = self.ALERT_FILTERS["Status"]
+        for alert in alerts:
+            where = f"{alert['detector']} on {alert['subject']}"
+            assert alert["detector"] in self.ALERT_FILTERS["Detector"], (
+                f"unknown detector {alert['detector']!r}"
+            )
+            assert alert["severity"] in severities, (
+                f"{where} carries an unknown severity {alert['severity']!r}"
+            )
+            assert alert["status"] in statuses, (
+                f"{where} carries an unknown status {alert['status']!r}"
+            )
+            opened = self._stamp(alert["opened"], "Opened")
+            if alert["status"] == "Open":
+                assert (alert["resolved"], alert["duration"]) == (
+                    "Not resolved", "Ongoing"
+                ), f"{where} is open but reads {alert}"
+            elif alert["status"] == "Resolved":
+                resolved = self._stamp(alert["resolved"], "Resolved")
+                assert resolved >= opened, (
+                    f"{where} was resolved before it opened: {alert}"
+                )
+                gap = int((resolved - opened).total_seconds() // 60)
+                assert self._minutes(alert["duration"]) == gap, (
+                    f"{where} states a duration of {alert['duration']!r} but "
+                    f"ran {gap} minute(s): {alert}"
+                )
+        opened = [self._stamp(a["opened"], "Opened") for a in alerts]
+        assert opened == sorted(opened, reverse=True), (
+            "the alert history is not newest first: "
+            f"{[a['opened'] for a in alerts]}"
         )
-        log.info("Alert history is empty for this range, and says why")
+        log.info("Alert history: %s episode(s) on page 1, newest %r",
+                 len(alerts), alerts[0]["opened"])
+
+    def expand_alert(self):
+        """An episode expands into the detector's evidence, then collapses."""
+        row = self.alert_rows.first
+        name = " ".join((row.inner_text() or "").split()[:3])
+        expect(row).to_have_attribute("aria-expanded", "false")
+        before = self._section("ALERTS", length=6000)
+        assert "By the detector" not in before, (
+            "detector evidence is showing before any episode was expanded"
+        )
+
+        log.info("Expanding the alert %r", name)
+        self._park_mouse()
+        row.scroll_into_view_if_needed()
+        row.click()
+        expect(row).to_have_attribute("aria-expanded", "true")
+        assert self._poll(
+            lambda: "By the detector" in self._section("ALERTS", length=6000),
+            timeout_ms=10000,
+        ), f"expanding {name!r} showed no detector evidence"
+        detail = self._section("ALERTS", length=6000)
+        detail = detail[detail.find("By the detector"):][:800]
+        assert re.search(r"\n[A-Z][\w ]+\n[^\n]+\n", detail), (
+            f"the evidence lists no measurements: {detail!r}"
+        )
+        log.info("Evidence: %r", detail.replace("\n", " ")[:110])
+
+        log.info("Collapsing it again")
+        self._park_mouse()
+        row.click()
+        expect(row).to_have_attribute("aria-expanded", "false")
+        assert self._poll(
+            lambda: "By the detector" not in self._section("ALERTS",
+                                                           length=6000),
+            timeout_ms=10000,
+        ), "the evidence stayed on screen after collapsing"
+
+    def filter_alerts(self):
+        """Severity narrows the history; a combination nothing matches shows
+        the empty state; and its Clear filters restores everything."""
+        baseline = self._settled_alerts()
+
+        log.info("Filtering alerts to severity %r", ALERT_SEVERITY)
+        self._pick_alert_option("Severity", ALERT_SEVERITY)
+        expect(self._alert_filter("Severity")).to_contain_text(ALERT_SEVERITY)
+        assert self._poll(
+            lambda: self._alerts() and all(
+                a["severity"] == ALERT_SEVERITY for a in self._alerts()
+            ),
+            timeout_ms=30000,
+        ), (
+            f"the {ALERT_SEVERITY!r} filter still lists "
+            f"{sorted({a['severity'] for a in self._alerts()})}"
+        )
+        log.info("Severity %r -> %s episode(s) on page 1",
+                 ALERT_SEVERITY, len(self._alerts()))
+
+        log.info("Adding status %r on top", ALERT_EMPTY_STATUS)
+        self._pick_alert_option("Status", ALERT_EMPTY_STATUS)
+        expect(self._alert_filter("Status")).to_contain_text(ALERT_EMPTY_STATUS)
+        assert self._poll(
+            lambda: self.alert_empty.count() > 0 or (
+                self._alerts() and all(
+                    (a["severity"], a["status"])
+                    == (ALERT_SEVERITY, ALERT_EMPTY_STATUS)
+                    for a in self._alerts()
+                )
+            ),
+            timeout_ms=30000,
+        ), "the two alert filters did not combine"
+        if self.alert_empty.count():
+            section = self._section("ALERTS", length=800)
+            assert "Try widening or clearing them" in section, (
+                "the alert empty state gives no way out"
+            )
+            log.info("%s + %s matches nothing, and the panel says so",
+                     ALERT_SEVERITY, ALERT_EMPTY_STATUS)
+        else:
+            log.info("%s + %s -> %s episode(s)", ALERT_SEVERITY,
+                     ALERT_EMPTY_STATUS, len(self._alerts()))
+
+        # The empty state carries the reset; with results, clear each filter
+        # by choosing its option again, which toggles it off.
+        if self.alert_empty.count():
+            log.info("Clearing the alert filters from the empty state")
+            self._park_mouse()
+            self.page.get_by_role("button", name="Clear filters").last.click()
+        else:
+            self._pick_alert_option("Status", ALERT_EMPTY_STATUS)
+            self._pick_alert_option("Severity", ALERT_SEVERITY)
+        for label in ("Severity", "Status"):
+            expect(self._alert_filter(label)).to_contain_text(
+                self.ALERT_DEFAULTS[label]
+            )
+        assert self._poll(lambda: self._alerts() == baseline,
+                          timeout_ms=30000), (
+            "clearing the alert filters did not restore the full history"
+        )
+
+    def filter_alerts_by_detector(self):
+        """The Detector filter searches its own options, applies one, and
+        toggles off when that option is chosen again."""
+        baseline = self._settled_alerts()
+
+        log.info("Searching the Detector filter for %r", ALERT_DETECTOR_QUERY)
+        self._park_mouse()
+        self._alert_filter("Detector").click()
+        self.page.get_by_role("dialog").last.get_by_role("textbox").fill(
+            ALERT_DETECTOR_QUERY
+        )
+        assert self._poll(
+            lambda: self.page.get_by_role("option").all_inner_texts()
+                    == [ALERT_DETECTOR],
+            timeout_ms=10000,
+        ), (
+            f"searching for {ALERT_DETECTOR_QUERY!r} left "
+            f"{self.page.get_by_role('option').all_inner_texts()}"
+        )
+        self.page.get_by_role("option", name=ALERT_DETECTOR).click()
+        expect(self._alert_filter("Detector")).to_contain_text(ALERT_DETECTOR)
+        assert self._poll(
+            lambda: self._alerts() and all(
+                a["detector"] == ALERT_DETECTOR for a in self._alerts()
+            ),
+            timeout_ms=30000,
+        ), (
+            f"the {ALERT_DETECTOR!r} filter still lists "
+            f"{sorted({a['detector'] for a in self._alerts()})}"
+        )
+        log.info("Detector %r -> %s episode(s) on page 1",
+                 ALERT_DETECTOR, len(self._alerts()))
+
+        log.info("Choosing %r again to clear it", ALERT_DETECTOR)
+        self._pick_alert_option("Detector", ALERT_DETECTOR)
+        expect(self._alert_filter("Detector")).to_contain_text(
+            self.ALERT_DEFAULTS["Detector"]
+        )
+        assert self._poll(lambda: self._alerts() == baseline,
+                          timeout_ms=30000), (
+            "clearing the detector did not restore the full history"
+        )
+
+    def paginate_alerts(self):
+        """The alert pager steps to older episodes and back."""
+        first = self._settled_alerts()
+        if not self.alert_next.is_enabled():
+            log.info("Every alert fits on one page -- nothing to page through")
+            return
+        last_page = self.page.get_by_role(
+            "button", name=re.compile(r"^Go to page \d+$")
+        ).last.inner_text()
+        log.info("Paging the alert history forward (%s page(s))", last_page)
+        self._park_mouse()
+        self.alert_next.scroll_into_view_if_needed()
+        self.alert_next.click()
+        assert self._poll(
+            lambda: self._alerts() and self._alerts() != first,
+            timeout_ms=25000,
+        ), "page 2 of the alert history shows the same episodes as page 1"
+        second = self._settled_alerts()
+        # Newest first across the page boundary, not only within a page.
+        assert self._stamp(second[0]["opened"], "Opened") <= self._stamp(
+            first[-1]["opened"], "Opened"
+        ), (
+            f"page 2 opens with {second[0]['opened']!r}, newer than the last "
+            f"episode on page 1 ({first[-1]['opened']!r})"
+        )
+        expect(self.alert_prev).to_be_enabled()
+        self._park_mouse()
+        self.alert_prev.click()
+        assert self._poll(lambda: self._alerts() == first, timeout_ms=25000), (
+            "going back did not restore page 1 of the alert history"
+        )
+        log.info("Alert pager: page 2 continues from %r", second[0]["opened"])
+
+    def check_alert_resolution_times(self):
+        """No episode may be marked Resolved at a time that has not happened.
+
+        Known product bug: the Reboot frequency detector resolves each episode
+        at the end of its 24-hour window rather than when the condition
+        cleared, so an episode opened this morning already reads "Resolved"
+        with tomorrow's timestamp (e.g. opened 28 Sep 05:30, "Resolved 29 Sep
+        05:30", 1d) while the clock still reads 28 Sep. That is a claim about
+        the future presented as history. The dates are compared in the
+        browser's own timezone, which is the one the page renders in.
+        """
+        now = datetime.strptime(
+            self.page.evaluate("""() => {
+                const d = new Date(), p = n => String(n).padStart(2, '0');
+                return `${d.getFullYear()}-${p(d.getMonth() + 1)}-` +
+                       `${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+            }"""),
+            "%Y-%m-%d %H:%M",
+        )
+        assert self._poll(lambda: self._alerts(), timeout_ms=30000), (
+            "the alert history never listed an episode"
+        )
+        seen = list(self._settled_alerts())
+        # The bug is concentrated in one detector; read its newest page too.
+        self._pick_alert_option("Detector", ALERT_DETECTOR,
+                                query=ALERT_DETECTOR_QUERY)
+        assert self._poll(
+            lambda: self._alerts() and all(
+                a["detector"] == ALERT_DETECTOR for a in self._alerts()
+            ),
+            timeout_ms=30000,
+        )
+        seen += self._settled_alerts()
+        self._pick_alert_option("Detector", ALERT_DETECTOR)
+        # The newest episodes appear in both reads; count each once.
+        seen = list({tuple(a.values()): a for a in seen}.values())
+
+        future = [
+            a for a in seen
+            if a["resolved"].startswith("Resolved ")
+            and self._stamp(a["resolved"], "Resolved") > now
+        ]
+        log.info("Checked %s episode(s) against %s", len(seen), now)
+        assert not future, (
+            f"{len(future)} episode(s) are marked Resolved at a time that has "
+            f"not happened yet (now {now:%d %b %Y, %H:%M}): "
+            + "; ".join(
+                f"{a['detector']} on {a['subject']} {a['opened']} -> "
+                f"{a['resolved']}" for a in future
+            )
+        )
 
     # ----------------------------------------------------------------- #
     # Site page
@@ -1210,7 +1938,7 @@ class network_health:
         self._park_mouse()
         self._open_row(self.rows.first)
         self.page.wait_for_url(
-            re.compile(r"/operations/network-health/[0-9a-f-]{36}$"),
+            re.compile(r"/operations/network-intelligence/[0-9a-f-]{36}$"),
             timeout=30000,
         )
         assert self._poll(self._loaded, timeout_ms=40000), (
@@ -1228,13 +1956,14 @@ class network_health:
             f"the site page does not name {name!r}: {body[:200]!r}"
         )
         expect(self.page.get_by_role(
-            "link", name="Back to Network Health"
+            "link", name="Back to Network Intelligence"
         )).to_be_visible()
-        expect(self.breadcrumb_nh).to_be_visible()
+        expect(self.breadcrumb_ni).to_be_visible()
 
         assert "Uptime trend" in body, (
             "the site page draws no uptime trend"
         )
+        self.check_kpi_deltas()
         self._assert_columns(self.CHARGER_COLUMNS)
 
         header = self.table.locator("thead th").first.inner_text() or ""
@@ -1249,7 +1978,7 @@ class network_health:
             assert re.search(r"ID:\s*\S+", cells[0]), (
                 f"a charger row states no ID: {cells[0]!r}"
             )
-            assert re.fullmatch(self.PERCENT, cells[1]), (
+            assert re.fullmatch(self.UPTIME_CELL, cells[1]), (
                 f"{cells[0].splitlines()[0]!r} shows an unreadable uptime: "
                 f"{cells[1]!r}"
             )
@@ -1265,24 +1994,11 @@ class network_health:
         self._open_row(self.rows.first)
         self.page.wait_for_url(
             re.compile(
-                r"/operations/network-health/[0-9a-f-]{36}/[0-9a-f-]{36}$"
+                r"/operations/network-intelligence/[0-9a-f-]{36}/[0-9a-f-]{36}$"
             ),
             timeout=30000,
         )
-        assert self._poll(self._tiles_loaded, timeout_ms=40000), (
-            f"the KPI tiles on {model!r} never loaded"
-        )
-        # The trend card and the connector table arrive on their own fetches,
-        # after the tiles. Reading the page before both have landed sees a
-        # chart with no granularity toggle and no connector section at all.
-        assert self._poll(
-            lambda: "CONNECTORS" in self._body() and "Daily" in self._body(),
-            timeout_ms=40000,
-        ), (
-            f"the charger page for {model!r} never finished rendering its "
-            f"trend and connectors"
-        )
-        self._park_mouse()
+        self._wait_for_charger_page(model)
 
         body = self._body()
         assert model in body, (
@@ -1305,6 +2021,11 @@ class network_health:
 
         # The same risk score the watchlist ranked it by, shown in full.
         assert "Risk score" in body, "the charger page shows no risk score"
+        band = re.search(r"Risk score\n.*?\n\d+\n(\w+)\nrank \d+ of \d+", body)
+        assert band and band.group(1) in self.RISK_BANDS, (
+            f"the risk score carries no known band: "
+            f"{body[body.find('Risk score'):][:120]!r}"
+        )
         for part in ("Persistence", "Responsiveness"):
             assert part in body, (
                 f"the risk score is not broken into {part!r}"
@@ -1315,11 +2036,18 @@ class network_health:
             "scoring window"
         )
 
-        # The trend can be read per day or per hour.
-        for grain in ("Daily", "Hourly"):
-            assert grain in body, (
-                f"the uptime trend offers no {grain!r} view"
-            )
+        # The trend can be read per day or per hour; it opens on Daily.
+        daily = self.page.get_by_role("tab", name="Daily")
+        hourly = self.page.get_by_role("tab", name="Hourly")
+        expect(daily).to_have_attribute("aria-selected", "true")
+        log.info("Switching the uptime trend to Hourly and back")
+        self._park_mouse()
+        hourly.click()
+        expect(hourly).to_have_attribute("aria-selected", "true")
+        expect(daily).to_have_attribute("aria-selected", "false")
+        self._park_mouse()
+        daily.click()
+        expect(daily).to_have_attribute("aria-selected", "true")
 
         assert "CONNECTORS" in body, "the charger page lists no connectors"
         self._assert_columns(self.CONNECTOR_COLUMNS)
@@ -1343,18 +2071,18 @@ class network_health:
         self._park_mouse()
         self.page.get_by_role("link", name=f"Back to {site}").click()
         self.page.wait_for_url(
-            re.compile(r"/operations/network-health/[0-9a-f-]{36}$"),
+            re.compile(r"/operations/network-intelligence/[0-9a-f-]{36}$"),
             timeout=30000,
         )
         assert self._poll(self._loaded, timeout_ms=40000)
 
-    def back_to_network_health(self):
+    def back_to_network_intelligence(self):
         """The site page's back link returns to the fleet view."""
-        log.info("Returning to Network Health")
+        log.info("Returning to Network Intelligence")
         self._park_mouse()
-        self.page.get_by_role("link", name="Back to Network Health").click()
+        self.page.get_by_role("link", name="Back to Network Intelligence").click()
         self.page.wait_for_url(
-            re.compile(r"/operations/network-health(\?|$)"), timeout=30000
+            re.compile(r"/operations/network-intelligence(\?|$)"), timeout=30000
         )
         self.heading.wait_for(state="visible", timeout=20000)
         assert self._poll(self._loaded, timeout_ms=40000), (
@@ -1365,10 +2093,12 @@ class network_health:
     # ----------------------------------------------------------------- #
     # Full workflow
     # ----------------------------------------------------------------- #
-    def network_health_page(self):
+    def network_intelligence_page(self):
         self.open_page()
         self.check_header()
+        self.check_refresh()
         self.check_kpi_tiles()
+        self.check_kpi_deltas()
         self.check_tile_tooltips()
         self.check_trend_section()
         self.check_uptime_distribution()
@@ -1379,15 +2109,29 @@ class network_health:
         self.check_watchlist()
         self.check_score_explainer()
         self.expand_watchlist()
+        self.open_watchlist_charger()
         self.check_sites_table()
+        self.check_coverage_scope()
         self.search_sites()
         self.filter_by_sub_org()
         self.check_date_range()
         self.expand_site_row()
         self.expand_all_site_rows()
         self.paginate_sites()
-        self.check_alerts_section()
+        self.check_alert_filters()
+        self.check_alert_rows()
+        self.expand_alert()
+        self.filter_alerts()
+        self.filter_alerts_by_detector()
+        self.paginate_alerts()
         site = self.open_site_page()
         self.open_charger_page(site)
-        self.back_to_network_health()
-        log.info("Network Health workflow completed")
+        self.back_to_network_intelligence()
+        log.info("Network Intelligence workflow completed")
+
+    # ----------------------------------------------------------------- #
+    # Known product bugs -- each its own test, see the method docstring
+    # ----------------------------------------------------------------- #
+    def alert_resolution_times_page(self):
+        self.open_page()
+        self.check_alert_resolution_times()

@@ -11,7 +11,7 @@ from pages.site_cost_data import SITE, site_cost_data
 @allure.severity(allure.severity_level.CRITICAL)
 @allure.title(
     "Site Cost Data: table structure and cost-value formats, search and empty "
-    "state, CPO and sub-organisation filters (applied, toggled off and cleared "
+    "state, the CPO filter (searched, applied, toggled off and cleared "
     "together), sorting on every working column, all four page sizes and the "
     "pager, the per-site activity trail, and the site cost page (breadcrumb, "
     "dated cost history, per-device breakdown, inline editor and Add Data "
@@ -22,6 +22,22 @@ def test_site_cost_data(page):
     # `page` is already logged in via the shared session (see conftest.py).
     b = site_cost_data(page)
     b.site_cost_data_page()
+
+
+@allure.feature("Site Cost Data")
+@allure.story("Sorting by site name")
+@allure.severity(allure.severity_level.CRITICAL)
+@allure.title(
+    "Site Cost Data: sorting by the Sites column orders the table by name in "
+    "both directions without emptying it"
+)
+# Formerly a strict xfail (sort_by=name was accepted and written to the URL but
+# the rows came back unsorted, sometimes empty). The product has fixed it, so it
+# now runs as a normal regression check.
+def test_site_cost_data_sort_by_name(page):
+    b = site_cost_data(page)
+    b.open_page()
+    b.sort_by_site_name()
 
 
 # --------------------------------------------------------------------------- #
@@ -42,29 +58,6 @@ def test_site_cost_data(page):
 # See the matching methods in pages/site_cost_data.py for the full description
 # of each, including how it presents on screen.
 # --------------------------------------------------------------------------- #
-
-
-@allure.feature("Site Cost Data")
-@allure.story("Known gap: sorting by site name")
-@allure.severity(allure.severity_level.CRITICAL)
-@allure.title(
-    "Site Cost Data: sorting by the Sites column does not order the table by "
-    "name -- sort_by=name is accepted and written to the URL but the rows come "
-    "back unsorted (and sometimes empty), where every other sortable column "
-    "reorders correctly"
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="Product bug: sort_by=name is not honoured. The Sites header takes "
-           "the click, writes sort_by=name&sort_order=asc to the URL and flips "
-           "its chevron, but the rows return in their unsorted order; it has "
-           "also been seen to return the table completely empty under the 'No "
-           "site cost data' state. Every other sortable column works.",
-)
-def test_site_cost_data_sort_by_name(page):
-    b = site_cost_data(page)
-    b.open_page()
-    b.sort_by_site_name()
 
 
 @allure.feature("Site Cost Data")

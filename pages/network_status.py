@@ -33,8 +33,9 @@ class network_status:
     """
 
     # The table's full column set. The first column holds the row expander and
-    # the second carries a live site count, so both are matched loosely.
-    COLUMNS = ["", "Sites", "CPO", "CD", "Access", "Availability",
+    # the second carries a live site count, so both are matched loosely. (The
+    # charging-device count column used to be abbreviated "CD".)
+    COLUMNS = ["", "Sites", "CPO", "Charging Device", "Access", "Availability",
                "Connectivity", "Admin Status", "Alerts", "Last Seen"]
 
     # Sortable columns and the `sort` value each sends. Everything else in the
@@ -45,7 +46,8 @@ class network_status:
         "Connectivity": "connectivity",
         "Alerts": "alerts",
     }
-    NOT_SORTABLE = ["CPO", "CD", "Access", "Admin Status", "Last Seen"]
+    NOT_SORTABLE = ["CPO", "Charging Device", "Access", "Admin Status",
+                    "Last Seen"]
 
     # The four socket-status tiles, in render order, with the aria-label each
     # one exposes and the phrase its tooltip must contain.
@@ -78,13 +80,15 @@ class network_status:
     # The availability dropdown's options -- the same four buckets as the tiles.
     AVAILABILITY_OPTIONS = ["Available", "In Use", "Faulted", "Offline"]
 
-    PAGE_SIZES = ["10", "20", "50", "100"]
+    # The rows-per-page choices (the second one used to be 20).
+    PAGE_SIZES = ["10", "25", "50", "100"]
 
     def __init__(self, page):
         self.page = page
 
         # Sidebar navigation
-        self.ns_link = page.get_by_role("link", name="Network Status")
+        # Exact: the page now also carries an in-page "Open Network Status" link.
+        self.ns_link = page.get_by_role("link", name="Network Status", exact=True).first
         self.heading = page.locator("//h1[normalize-space()='Network Status']")
 
         # Search
@@ -119,7 +123,7 @@ class network_status:
 
         # Pagination
         self.page_size = page.get_by_role(
-            "button", name=re.compile(r"^(10|20|50|100)$")
+            "button", name=re.compile(r"^(10|25|50|100)$")
         )
         self.next_page = page.get_by_role("button", name="Go to next page")
         self.prev_page = page.get_by_role("button", name="Go to previous page")
@@ -397,7 +401,7 @@ class network_status:
             expect(popover.get_by_role("button", name="Apply")).to_be_visible()
             expect(popover.get_by_role("button", name="Clear")).to_be_visible()
             log.info("Filter %-22s -> %s option(s)", trigger, options)
-            if trigger == "All availability":
+            if trigger == "Availability":
                 listed = [
                     o.inner_text().strip()
                     for o in self.page.get_by_role("option").all()
@@ -418,16 +422,14 @@ class network_status:
         expects the table to move would pass on a broken Apply.
         """
         before = self._site_count()
-        self._apply_filter("All CPOs", CPO, "cpo_id")
-        expect(
-            self.page.get_by_role("button", name=f"CPO: {CPO}")
-        ).to_be_visible()
+        self._apply_filter("CPO", CPO, "cpo_id")
+        expect(self._filter("CPO")).to_contain_text(CPO)
         assert self._poll(lambda: self._site_count() < before), (
             f"the CPO filter did not narrow the list from {before}"
         )
         self._assert_column("CPO", CPO)
         log.info("CPO filter %r -> %s site(s)", CPO, self._site_count())
-        self._clear_filter(f"CPO: {CPO}", "cpo_id", before)
+        self._clear_filter("CPO", "cpo_id", before)
 
     def filter_by_availability_dropdown(self):
         """The availability dropdown drives the same filter as the tile.
@@ -437,10 +439,8 @@ class network_status:
         in step.
         """
         before = self._site_count()
-        self._apply_filter("All availability", STATUS, "availability")
-        expect(
-            self.page.get_by_role("button", name=f"Availability: {STATUS}")
-        ).to_be_visible()
+        self._apply_filter("Availability", STATUS, "availability")
+        expect(self._filter("Availability")).to_contain_text(STATUS)
         assert self._poll(lambda: self._site_count() < before), (
             f"the availability filter did not narrow the list from {before}"
         )
@@ -450,15 +450,27 @@ class network_status:
         )
         log.info("Availability dropdown %r -> %s site(s), and the %s tile is lit",
                  STATUS, self._site_count(), STATUS)
-        self._clear_filter(f"Availability: {STATUS}", "availability", before)
+        self._clear_filter("Availability", "availability", before)
         expect(self._tile(STATUS.upper())).to_have_attribute(
             "aria-pressed", "false"
         )
 
+    def _filter(self, label):
+        """The multi-select filter trigger labelled `label`.
+
+        The trigger's accessible name is its label followed by its current
+        value ("CPO All CPOs", later "CPO Capurro Garage ..."), so it is
+        anchored on the label -- the only half that does not change when a
+        value is applied. It used to be named by its value alone.
+        """
+        return self.page.get_by_role(
+            "button", name=re.compile(rf"^{re.escape(label)}\b")
+        ).first
+
     def _apply_filter(self, trigger, value, param):
-        """Open a multi-select filter, tick `value` and press Apply."""
+        """Open the `trigger` multi-select filter, tick `value`, press Apply."""
         log.info("Opening the %r filter and ticking %r", trigger, value)
-        self.page.get_by_role("button", name=trigger, exact=True).click()
+        self._filter(trigger).click()
         self.page.wait_for_timeout(1200)
         popover = self.page.get_by_role("dialog").last
 
@@ -482,9 +494,9 @@ class network_status:
         )
 
     def _clear_filter(self, trigger_label, param, expected_total):
-        """Re-open a applied filter and press Clear."""
+        """Re-open an applied filter and press Clear."""
         log.info("Clearing the %r filter", trigger_label)
-        self.page.get_by_role("button", name=trigger_label, exact=True).click()
+        self._filter(trigger_label).click()
         self.page.wait_for_timeout(1200)
         self.page.get_by_role("dialog").last.get_by_role(
             "button", name="Clear"
@@ -569,6 +581,15 @@ class network_status:
             ), f"reversing the {col!r} sort did not reorder the table"
             log.info("Column %-13s sorts asc+desc (sort=%s)", col, param)
 
+        # Drop the sort before probing the non-sortable columns. The last
+        # sort applied is Alerts, where most rows tie on "no alerts" -- the
+        # server's order among ties is not stable across refetches, so a
+        # baseline taken there can reshuffle on its own and look like the
+        # next header click sorted the table. The default name order has no
+        # ties.
+        self.page.goto(self.page.url.split("?")[0])
+        assert self._poll(self._loaded, timeout_ms=30000)
+
         for col in self.NOT_SORTABLE:
             # Wait for the previous action's repaint to finish before taking the
             # baseline, or its tail looks like this column reordering the table.
@@ -583,10 +604,6 @@ class network_status:
                 f"clicking {col!r} changed the URL: {self.page.url}"
             )
         log.info("Columns %s are correctly not sortable", self.NOT_SORTABLE)
-
-        # Drop the sort so the rest of the run sees the default order.
-        self.page.goto(self.page.url.split("?")[0])
-        assert self._poll(self._loaded, timeout_ms=30000)
 
     # ----------------------------------------------------------------- #
     # Row expansion

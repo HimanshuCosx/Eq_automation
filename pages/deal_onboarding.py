@@ -40,8 +40,7 @@ class deal_onboarding:
     disabled submit buttons, then dismissed with Cancel / Clear / Escape. The
     run leaves staging exactly as it found it.
 
-    Column sorting is checked separately by `sort_columns` -- see the note
-    there.
+    Column sorting is checked separately by `sort_columns`, in its own test.
     """
 
     # The table's full column set. The first header is blank: it holds the
@@ -82,8 +81,10 @@ class deal_onboarding:
     def __init__(self, page):
         self.page = page
 
-        # Sidebar navigation
-        self.nav_link = page.get_by_role("link", name="Deal Onboarding")
+        # Sidebar navigation. Exact: the Command Center page now carries an
+        # in-page "Open Deal Onboarding" link, which a substring match also
+        # resolves to (a strict-mode violation) whenever that page is showing.
+        self.nav_link = page.get_by_role("link", name="Deal Onboarding", exact=True)
 
         # Search
         self.search = page.get_by_placeholder(re.compile(r"^Search deals"))
@@ -1049,57 +1050,112 @@ class deal_onboarding:
         )
 
     # ----------------------------------------------------------------- #
-    # Sorting -- see the note below
+    # Sorting
     # ----------------------------------------------------------------- #
-    def sort_columns(self):
-        """Sort every sortable column and prove the rows actually reorder.
+    # How each sortable column's cell text orders. Criticality is ranked by
+    # meaning, not alphabetically ("High" < "Low" < "Medium" would be wrong).
+    SORT_KEYS = {
+        "Total Sites": lambda v: int(v),
+        "Progress": lambda v: float(v.rstrip("%")),
+        "Deal Date": lambda v: time.strptime(v, "%d-%m-%Y"),
+        "Criticality": lambda v: ["Low", "Medium", "High"].index(v),
+    }
 
-        This is kept out of `deal_onboarding_page` because it currently fails,
-        and it fails on the product rather than on the automation. Clicking a
-        sortable header does update the URL (`sortColumn` / `sortDirection`)
-        and does flip the header's chevron, but the table never reorders --
-        the same rows come back in the same order in both directions, for all
-        four sortable columns. The assertion below is written for the
-        behaviour the control advertises, so it will start passing on its own
-        once sorting is wired up.
+    def _snapshot(self):
+        """Every deal row's cell texts, read in a single pass.
+
+        The table re-renders when a sort refetch lands, and a row locator
+        captured before that goes stale -- a later per-cell inner_text() on it
+        waits out its full timeout rather than returning. Reading the whole
+        table inside one evaluate_all cannot straddle a repaint.
+        """
+        try:
+            return self.rows.evaluate_all(
+                "rows => rows.map(r => Array.from(r.cells, "
+                "c => c.innerText.replace(/\\s+/g, ' ').trim()))"
+            )
+        except Exception:
+            return []
+
+    def _sorted_by(self, col, direction):
+        """True when the table is ordered on `col` in `direction`.
+
+        Returns False (not settled) while the table is empty or a cell does
+        not parse -- e.g. mid-repaint -- so it is safe to poll.
+        """
+        idx = self.COLUMNS.index(col)
+        rows = self._snapshot()
+        try:
+            keys = [self.SORT_KEYS[col](r[idx]) for r in rows]
+        except (ValueError, IndexError):
+            return False
+        return bool(keys) and keys == sorted(keys, reverse=direction == "desc")
+
+    def sort_columns(self):
+        """Sort every sortable column both ways and check the rows follow.
+
+        Each click is checked against the sorted column's *values*: the URL
+        (`sortColumn` / `sortDirection`) and the chevron update immediately,
+        so they prove nothing on their own, and a bare "the order changed"
+        check both races the refetch and cannot tell ascending from shuffled.
+
+        Where the page holds more than one distinct value, the two directions
+        must also produce different row orders. Progress currently reads 0% on
+        every staging deal, so for it the ordering holds trivially and a
+        reorder cannot be observed -- that is logged rather than failed.
+
+        Split out of `deal_onboarding_page` into its own test because sorting
+        used to be accepted but not applied (the rows never reordered); it is
+        kept separate so a regression there is reported on its own.
         """
         for col, param in self.SORTABLE.items():
-            baseline = self._settled_names()
+            idx = self.COLUMNS.index(col)
+            orders = {}
+            for _ in range(2):
+                previous = re.search(r"sortDirection=(asc|desc)", self.page.url)
+                self._park_mouse()
+                self._header(col).click()
+                # Wait for this click's own direction to land in the URL -- on
+                # the second click sortColumn is already there, so waiting on
+                # that alone would return before the direction flipped.
+                if previous and f"sortColumn={param}" in self.page.url:
+                    flipped = "desc" if previous.group(1) == "asc" else "asc"
+                    self.page.wait_for_url(
+                        lambda u: f"sortColumn={param}" in u
+                        and f"sortDirection={flipped}" in u,
+                        timeout=15000,
+                    )
+                else:
+                    self.page.wait_for_url(
+                        lambda u: f"sortColumn={param}" in u, timeout=15000
+                    )
+                direction = re.search(r"sortDirection=(asc|desc)", self.page.url)
+                assert direction, (
+                    f"sorting by {col!r} set no sortDirection: {self.page.url}"
+                )
+                direction = direction.group(1)
+                assert self._poll(
+                    lambda: self._sorted_by(col, direction), timeout_ms=20000
+                ), (
+                    f"sortColumn={param}&sortDirection={direction} but the "
+                    f"{col} column is not in {direction} order: "
+                    f"{[r[idx] for r in self._snapshot()]}"
+                )
+                # The refetch can land in two steps; take the order once it
+                # has stopped moving.
+                self._settled_names()
+                orders[direction] = [r[1] for r in self._snapshot()]
 
-            self._park_mouse()
-            self._header(col).click()
-            self.page.wait_for_url(
-                re.compile(rf"[?&]sortColumn={param}\b"), timeout=15000
-            )
-            assert self._poll(self._loaded, timeout_ms=20000), (
-                f"the table is empty after sorting by {col!r}"
-            )
-            direction = re.search(r"sortDirection=(asc|desc)", self.page.url)
-            assert direction, (
-                f"sorting by {col!r} set no sortDirection: {self.page.url}"
-            )
-            ascending = self._settled_names()
-            assert ascending != baseline, (
-                f"sorting by {col!r} set sortColumn={param}&"
-                f"sortDirection={direction.group(1)} but the table came back in "
-                f"its original order: {ascending[:4]}"
-            )
-
-            opposite = "desc" if direction.group(1) == "asc" else "asc"
-            self._park_mouse()
-            self._header(col).click()
-            # Wait for the *direction* to flip, not merely for sortColumn to be
-            # present -- it already is from the first click, so waiting on that
-            # returns instantly and the row comparison below then races the
-            # refetch instead of following it.
-            self.page.wait_for_url(
-                re.compile(rf"[?&]sortDirection={opposite}\b"), timeout=15000
-            )
-            assert self._poll(
-                lambda a=ascending: self._names() and self._names() != a,
-                timeout_ms=20000,
-            ), f"reversing the {col!r} sort did not reorder the table"
-            log.info("Column %-12s sorts both ways (sortColumn=%s)", col, param)
+            values = {r[idx] for r in self._snapshot()}
+            if len(values) > 1:
+                assert orders["asc"] != orders["desc"], (
+                    f"{col} holds {len(values)} distinct values but ascending "
+                    f"and descending produced the same row order"
+                )
+                log.info("Column %-12s sorts both ways (sortColumn=%s)", col, param)
+            else:
+                log.info("Column %-12s is ordered both ways, but every row reads "
+                         "%r so a reorder cannot be observed", col, values.pop())
 
         # The remaining headers carry neither a sort chevron nor a pointer
         # cursor, and clicking one leaves the URL alone.

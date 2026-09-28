@@ -22,11 +22,6 @@ SITE_CPO = "East of England CO OP"
 CPO = "Mulberry Homes"
 CPO_SITES = ["Moulton", "Launton"]
 
-# The only sub-organisation on staging. Every site belongs to it, which is why
-# the check below pins the *button state* and the row survival rather than a
-# change in the row count -- see `filter_by_sub_organisation`.
-SUB_ORG = "Plug-N-Go"
-
 # A search term that matches one site, and one that matches nothing.
 SEARCH_TERM = "Earlham"
 NO_MATCH = "zzzz-no-such-site"
@@ -37,7 +32,7 @@ class site_cost_data:
 
     The commercial terms behind every site on the network: a searchable,
     filterable, sortable table of the cost basis each site is billed on --
-    profit share, electricity unit cost and standing charge -- plus a per-site
+    profit share, energy unit cost and standing charge -- plus a per-site
     page holding the dated history of those terms and an audit trail of who
     changed what, when, and from which uploaded sheet.
 
@@ -52,11 +47,13 @@ class site_cost_data:
     unlocks and the values it pre-fills, and both are then dismissed with
     Cancel. The run leaves staging exactly as it found it.
 
-    Four behaviours on this page are currently broken on the product rather
+    Three behaviours on this page are currently broken on the product rather
     than on the automation. They are checked by their own methods -- see
-    `sort_by_site_name`, `footer_reflects_filter`, `default_page_size` and
+    `footer_reflects_filter`, `default_page_size` and
     `add_pricing_requires_input` -- so that the main workflow reports the state
     of everything that does work, and each gap stays individually visible.
+    Sorting by site name (`sort_by_site_name`) was a fourth; it has been fixed
+    on the product and is kept as its own regression check.
     """
 
     # ------------------------------------------------------------------ #
@@ -65,21 +62,22 @@ class site_cost_data:
 
     # The table's full column set. The last header is blank: it holds the row's
     # trailing chevron rather than a label.
-    COLUMNS = ["Sites", "CD", "CPO", "Site Profit Share %",
-               "Electricity Unit Cost", "Standing Charge", "Duration",
+    COLUMNS = ["Sites", "Charging Device", "CPO", "Profit Share %",
+               "Energy Unit Cost", "Standing Charge", "Duration",
                "Activity", ""]
 
-    # Sortable columns that work, and the `sort_by` value each sends.
-    # "Sites" is deliberately absent -- it is sortable in the UI but empties
-    # the table, which `sort_by_site_name` covers on its own.
+    # Sortable columns, and the `sort_by` value each sends. "Sites" is
+    # deliberately absent -- sorting by it used to be broken (unsorted or
+    # emptied rows) and is covered on its own by `sort_by_site_name`, which
+    # also compares names rather than the numeric values `_sort_values` reads.
     SORTABLE = {
-        "CD": "charging_device_count",
+        "Charging Device": "charging_device_count",
         "CPO": "cpo",
-        "Site Profit Share %": "site_profit_share",
-        "Electricity Unit Cost": "electricity_unit_cost",
+        "Profit Share %": "site_profit_share",
+        "Energy Unit Cost": "electricity_unit_cost",
         "Standing Charge": "standing_charge",
     }
-    BROKEN_SORT = ("Sites", "name")
+    NAME_SORT = ("Sites", "name")
     NOT_SORTABLE = ["Duration", "Activity"]
 
     PAGE_SIZES = ["10", "20", "50", "100"]
@@ -89,8 +87,8 @@ class site_cost_data:
     # column checks accept either and reject anything else.
     UNSET = "—"
     CELL_SHAPES = {
-        3: r"\d+\.\d{2}%",          # Site Profit Share %
-        4: r"£\d+\.\d{5}",          # Electricity Unit Cost
+        3: r"\d+\.\d{2}%",          # Profit Share %
+        4: r"£\d+\.\d{5}",          # Energy Unit Cost
         5: r"£\d+\.\d{5}/(day|month)",  # Standing Charge
     }
 
@@ -104,21 +102,21 @@ class site_cost_data:
     # Detail page
     # ------------------------------------------------------------------ #
 
-    DETAIL_COLUMNS = ["", "Start Date", "End Date", "Site Profit Share %",
-                      "Electricity Unit Cost", "Standing Charge", "Updated At",
+    DETAIL_COLUMNS = ["", "Start Date", "End Date", "Profit Share %",
+                      "Energy Unit Cost", "Standing Charge", "Updated At",
                       "Actions"]
 
     # The Add Data dialog's controls.
     CATEGORIES = ["Site Wise", "Charging Devices"]
     FREQUENCIES = ["Day", "Monthly"]
-    PRICING_FIELDS = ["CPO Share %", "Electricity Unit Cost", "Standing Charge"]
+    PRICING_FIELDS = ["Profit Share %", "Energy Unit Cost", "Standing Charge"]
 
     # The inline row editor's fields, by the aria-label each input exposes.
-    # Note these differ in case from the dialog's ("CPO Share %" against "Site
-    # profit share %") -- they are two separate forms onto the same values, so
-    # a loose match would find whichever happened to be mounted.
-    EDIT_FIELDS = ["Site profit share %", "Electricity unit cost",
-                   "Standing charge"]
+    # Note these differ from the dialog's only in case ("Profit Share %"
+    # against "Profit share %") -- they are two separate forms onto the same
+    # values, so they are always matched exactly (case-sensitively); a loose
+    # match would find whichever happened to be mounted.
+    EDIT_FIELDS = ["Profit share %", "Energy unit cost", "Standing charge"]
 
     def __init__(self, page):
         self.page = page
@@ -137,12 +135,11 @@ class site_cost_data:
         self.rows = self.table.locator("tbody > tr:not(:has(td[colspan]))")
         self.expanded = self.table.locator("tbody > tr:has(td[colspan])")
 
-        # Filters. Both are dropdowns whose button carries its own current
-        # value, which is what makes the applied state checkable.
-        self.sub_org_filter = page.get_by_role(
-            "button", name=re.compile(r"^Sub-Organisation")
-        )
+        # CPO filter: a dropdown whose button carries its own current value,
+        # which is what makes the applied state checkable. It opens a popover
+        # with its own search box -- see `_pick_cpo`.
         self.cpo_filter = page.get_by_role("button", name=re.compile(r"^CPO\b"))
+        self.cpo_search = page.get_by_placeholder("Search organisations...")
         self.clear_filters = page.get_by_role("button", name="Clear filters")
 
         # Empty states. The page has two, and they mean different things: one
@@ -278,7 +275,7 @@ class site_cost_data:
 
         Positional rather than by text: "Sites" is a prefix of nothing but
         "CPO" appears in both the filter above the table and the header, and
-        "Site Profit Share %" carries a regex metacharacter. The column set is
+        "Profit Share %" carries a regex metacharacter. The column set is
         already pinned by `check_table_structure`, so the index is safe.
         """
         return self.table.locator("thead th").nth(self.COLUMNS.index(col))
@@ -338,6 +335,27 @@ class site_cost_data:
             for b in self.page.get_by_role("button").all()
             if (b.get_attribute("aria-label") or "").startswith("Go to page")
         ]
+
+    def _pick_cpo(self, cpo):
+        """Open the CPO filter, find `cpo` through its search box and click it.
+
+        The popover lists only the first twenty CPOs alphabetically and does
+        not load more on scroll, so most CPOs -- Mulberry Homes among them --
+        can only be reached by typing. The search box also keeps its text
+        between openings, so it is refilled every time. Clicking an option is a
+        toggle: it applies the CPO, or drops it if it was already applied.
+        """
+        self._park_mouse()
+        self.cpo_filter.first.click()
+        self.cpo_search.wait_for(state="visible", timeout=10000)
+        self.cpo_search.fill(cpo)
+        # The list re-renders as the search narrows it; wait for it to settle
+        # on the one match rather than click an option about to detach.
+        assert self._poll(lambda: self._options() == [cpo], timeout_ms=10000), (
+            f"searching the CPO filter for {cpo!r} offered {self._options()}"
+        )
+        self.page.get_by_role("option", name=cpo, exact=True).click()
+        self._close_popover()
 
     def _set_page_size(self, size):
         self._park_mouse()
@@ -522,9 +540,10 @@ class site_cost_data:
     def filter_by_cpo(self):
         """Narrow the table to one CPO, then toggle it back off.
 
-        The CPO list is built from the CPOs that actually hold sites rather
-        than the whole partner directory, so it is checked both for the value
-        under test and for the absence of blanks.
+        The unsearched list is checked for blanks and for alphabetical order
+        (case-insensitive -- "CEPSA" sits between "Capurro" and "Cobo"); the
+        CPO under test is then reached through the popover's search box, which
+        is the only way to it, since the list shows just its first twenty.
         """
         before = self._settled_names()
 
@@ -534,18 +553,24 @@ class site_cost_data:
         assert self._poll(
             lambda: self.page.get_by_role("option").count() > 0, timeout_ms=10000
         ), "the CPO filter opened with no options"
+        # Clear any search left over from an earlier opening before reading the
+        # unfiltered list.
+        self.cpo_search.fill("")
+        assert self._poll(
+            lambda: len(self._options()) > 1, timeout_ms=10000
+        ), f"the CPO filter lists {self._options()} with no search applied"
         listed = self._options()
-        assert CPO in listed, f"the CPO filter does not offer {CPO!r}"
         assert all(o for o in listed), (
             f"the CPO filter offers blank entries: {listed}"
         )
-        assert listed == sorted(listed), (
+        assert listed == sorted(listed, key=str.casefold), (
             f"the CPO filter is not in alphabetical order: {listed}"
         )
-        log.info("CPO filter offers %s CPO(s)", len(listed))
-
-        self.page.get_by_role("option", name=CPO, exact=True).click()
+        log.info("CPO filter lists %s CPO(s) before searching", len(listed))
         self._close_popover()
+
+        log.info("Searching the CPO filter for %r and applying it", CPO)
+        self._pick_cpo(CPO)
         assert self._poll(
             lambda: self._names() and self._names() != before, timeout_ms=25000
         ), f"the table did not change under the {CPO!r} filter"
@@ -577,7 +602,9 @@ class site_cost_data:
         log.info("Toggling the CPO filter back off")
         self._park_mouse()
         self.cpo_filter.first.click()
-        assert self._poll(lambda: self.page.get_by_role("option").count() > 0)
+        self.cpo_search.wait_for(state="visible", timeout=10000)
+        self.cpo_search.fill(CPO)
+        assert self._poll(lambda: self._options() == [CPO], timeout_ms=10000)
         selected = [
             (o.inner_text() or "").strip()
             for o in self.page.get_by_role("option").all()
@@ -595,55 +622,6 @@ class site_cost_data:
             "the CPO filter button still names a CPO after being cleared"
         )
 
-    def filter_by_sub_organisation(self):
-        """The sub-organisation filter applies and clears.
-
-        Staging holds a single sub-organisation that every site belongs to, so
-        applying it cannot narrow the table -- and that is exactly why this
-        checks the button state and the rows *surviving* rather than a drop in
-        the count. A filter that wrongly excluded everything would fail here.
-        """
-        before = self._settled_names()
-
-        log.info("Opening the sub-organisation filter")
-        self._park_mouse()
-        self.sub_org_filter.first.click()
-        assert self._poll(
-            lambda: self.page.get_by_role("option").count() > 0, timeout_ms=10000
-        ), "the sub-organisation filter opened with no options"
-        listed = self._options()
-        assert listed == [SUB_ORG], (
-            f"the sub-organisation filter offers {listed}, expected [{SUB_ORG!r}]"
-        )
-
-        self.page.get_by_role("option", name=SUB_ORG, exact=True).click()
-        self._close_popover()
-        assert self._poll(
-            lambda: SUB_ORG in (self.sub_org_filter.first.inner_text() or ""),
-            timeout_ms=20000,
-        ), (
-            "the sub-organisation filter button does not name "
-            f"{SUB_ORG!r}: {self.sub_org_filter.first.inner_text()!r}"
-        )
-        assert self._poll(lambda: self._names() == before, timeout_ms=25000), (
-            f"filtering on {SUB_ORG!r} -- which owns every site -- changed the "
-            f"table: {self._names()[:3]} != {before[:3]}"
-        )
-        log.info("Sub-organisation %r -> %s site(s)", SUB_ORG, self.rows.count())
-
-        log.info("Toggling the sub-organisation filter back off")
-        self._park_mouse()
-        self.sub_org_filter.first.click()
-        assert self._poll(lambda: self.page.get_by_role("option").count() > 0)
-        self.page.get_by_role("option", name=SUB_ORG, exact=True).click()
-        self._close_popover()
-        assert self._poll(
-            lambda: "All sub-organisations"
-            in (self.sub_org_filter.first.inner_text() or ""),
-            timeout_ms=20000,
-        ), "the sub-organisation filter did not clear"
-        assert self._poll(lambda: self._names() == before, timeout_ms=25000)
-
     def clear_all_filters(self):
         """The Clear filters control drops the search and the CPO together.
 
@@ -654,11 +632,7 @@ class site_cost_data:
         before = self._settled_names()
 
         log.info("Applying a CPO filter and a search that cannot coexist")
-        self._park_mouse()
-        self.cpo_filter.first.click()
-        assert self._poll(lambda: self.page.get_by_role("option").count() > 0)
-        self.page.get_by_role("option", name=CPO, exact=True).click()
-        self._close_popover()
+        self._pick_cpo(CPO)
         assert self._poll(
             lambda: self._names() and self._names() != before, timeout_ms=25000
         )
@@ -692,8 +666,8 @@ class site_cost_data:
     # Sorting
     # ----------------------------------------------------------------- #
     # The column each sortable heading actually orders on, by index.
-    SORT_INDEX = {"CD": 1, "CPO": 2, "Site Profit Share %": 3,
-                  "Electricity Unit Cost": 4, "Standing Charge": 5}
+    SORT_INDEX = {"Charging Device": 1, "CPO": 2, "Profit Share %": 3,
+                  "Energy Unit Cost": 4, "Standing Charge": 5}
 
     def _sort_values(self, col):
         """Column `col` as comparable values, with unset cells as None.
@@ -1160,7 +1134,7 @@ class site_cost_data:
             assert (field.first.input_value() or "").strip() != "", (
                 f"the editor opened {label!r} empty rather than pre-filled"
             )
-        share = self.page.get_by_label("Site profit share %", exact=True).first
+        share = self.page.get_by_label("Profit share %", exact=True).first
         assert f"{float(share.input_value()):.2f}%" == shown[3], (
             f"the editor pre-filled the profit share as "
             f"{share.input_value()!r}, the row shows {shown[3]!r}"
@@ -1296,28 +1270,36 @@ class site_cost_data:
         )
 
     # ----------------------------------------------------------------- #
-    # Known product gaps -- each checked on its own, see the class docstring
+    # Known product gaps (and one fixed gap kept as a regression check) --
+    # each checked on its own, see the class docstring
     # ----------------------------------------------------------------- #
     def sort_by_site_name(self):
-        """Sorting by Sites must reorder the table by site name.
+        """Sorting by Sites reorders the table by site name, both ways.
 
-        Currently fails on the product: `sort_by=name` is not honoured. The
-        Sites header behaves like the others on the surface -- it takes the
-        click, writes `sort_by=name&sort_order=asc` into the URL and flips its
-        chevron -- but the rows that come back are not in name order, in either
-        direction. It has been seen to fail two ways on staging: usually the
-        table returns in exactly its unsorted order, and sometimes it comes
-        back completely empty, showing the "No site cost data" state -- the one
-        that means *nothing has ever been imported*, not *nothing matched* --
-        under a footer reading "Showing 0 results". The assertions below cover
-        both: the rows must survive, and they must be in name order.
+        This used to be broken on the product -- `sort_by=name` was written to
+        the URL but not honoured, so the rows came back in their unsorted order
+        or, on occasion, not at all (the "No site cost data" state under a
+        footer reading "Showing 0 results"). It has since been fixed; this is
+        kept as its own check, rather than folded into `SORTABLE`, so a
+        regression of that specific fault stays individually visible. The
+        assertions still cover both ways it used to fail: the rows must
+        survive, and they must be in name order.
 
-        Every other sortable column reorders correctly, so this is one broken
-        sort key rather than broken sorting.
+        The order is polled for rather than read once the rows stop changing:
+        the URL flips to the new direction before the refetch lands, and a
+        slow response can hold the previous direction's rows steady for longer
+        than a settle check waits -- which then reads a perfectly good asc
+        result as a broken desc one.
         """
-        col, param = self.BROKEN_SORT
+        col, param = self.NAME_SORT
         baseline = self._settled_names()
         assert baseline, "the table is empty before sorting"
+
+        def in_order(order):
+            names = self._names()
+            return bool(names) and names == sorted(
+                names, key=str.casefold, reverse=(order == "desc")
+            )
 
         for order in ("asc", "desc"):
             self._park_mouse()
@@ -1335,11 +1317,9 @@ class site_cost_data:
                 f"{len(baseline)} site(s) stood before"
             )
             # Having survived, it must also actually be in name order.
-            names = self._settled_names()
-            expected = sorted(names, key=str.casefold, reverse=(order == "desc"))
-            assert names == expected, (
+            assert self._poll(lambda o=order: in_order(o), timeout_ms=30000), (
                 f"sorting by {col!r} {order} returned rows out of name order: "
-                f"{names[:4]}"
+                f"{self._names()[:4]}"
             )
             log.info("Sorting by %s %s kept %s row(s) in order", col, order,
                      self.rows.count())
@@ -1354,11 +1334,7 @@ class site_cost_data:
         the footer is told there are 115 more results than exist, and paging
         forward lands on pages the filter has emptied.
         """
-        self._park_mouse()
-        self.cpo_filter.first.click()
-        assert self._poll(lambda: self.page.get_by_role("option").count() > 0)
-        self.page.get_by_role("option", name=CPO, exact=True).click()
-        self._close_popover()
+        self._pick_cpo(CPO)
         assert self._poll(
             lambda: sorted(self._names()) == sorted(CPO_SITES), timeout_ms=30000
         ), f"the {CPO!r} filter returned {self._names()}"
@@ -1466,7 +1442,6 @@ class site_cost_data:
         self.check_table_structure()
         self.search_sites()
         self.filter_by_cpo()
-        self.filter_by_sub_organisation()
         self.clear_all_filters()
         self.sort_columns()
         self.paginate()

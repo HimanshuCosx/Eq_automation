@@ -27,22 +27,11 @@ def test_deal_onboarding(page):
     "Deal Onboarding: every sortable column reorders the table in both "
     "directions"
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="Product bug: sorting is accepted but not applied. Clicking a "
-           "sortable header writes sortColumn/sortDirection into the URL and "
-           "flips the chevron, but the rows come back in their original order "
-           "in both directions, for all four sortable columns. Marked strict "
-           "so that the day sorting is wired up this XPASSes and fails the "
-           "build, prompting the marker to be removed rather than letting the "
-           "fix land unnoticed.",
-)
 def test_deal_onboarding_sorting(page):
-    # Split out from the main workflow because it currently fails on the
-    # product, not on the automation: clicking a sortable header updates the
-    # URL and the chevron but the rows never reorder, in either direction, for
-    # any of the four sortable columns. Kept as a real assertion so the gap
-    # stays visible and starts passing on its own once sorting is wired up.
+    # Kept apart from the main workflow so a sorting regression is reported
+    # on its own. This used to be a strict xfail: sorting was accepted (URL
+    # and chevron updated) but the rows never reordered. Staging now applies
+    # it, so the marker was removed and it runs as a plain test.
     b = deal_onboarding(page)
     b.open_page()
     b.sort_columns()

@@ -2,6 +2,8 @@ import logging
 import re
 import time
 
+import pytest
+
 log = logging.getLogger("eq_automation.tracker_templates")
 
 
@@ -107,7 +109,40 @@ class tracker_templates:
         self.page.wait_for_timeout(2000)
         return self._own_row(name)
 
+    def _require_access(self):
+        """Fail at once, and say why, if the account can no longer see this page.
+
+        The sidebar only lists pages the signed-in role may open, so a missing
+        link otherwise surfaces as an opaque 30-second click timeout. When it
+        is gone the route is loaded directly to tell "moved" apart from
+        "access revoked": the app answers a forbidden route with an Access
+        Denied screen rather than a 404.
+        """
+        if self.tt_link.count():
+            return
+        origin = "/".join(self.page.url.split("/", 3)[:3])
+        self.page.goto(origin + "/admin/tracker-templates")
+        denied = self.page.get_by_text("Access Denied", exact=True)
+        try:
+            denied.wait_for(timeout=20000)
+        except Exception:
+            pytest.fail(
+                "the sidebar no longer links to Tracker Templates, and "
+                "/admin/tracker-templates does not say why: "
+                f"{(self.page.locator('body').inner_text() or '')[:200]!r}",
+                pytrace=False,
+            )
+        pytest.fail(
+            "The test account no longer has access to Tracker Templates: the "
+            "sidebar link is gone and /admin/tracker-templates shows \"Access "
+            "Denied -- You don't have permission to view this page\". This is "
+            "a role/permission change on staging, not a test fault; restore "
+            "the account's Tracker Templates permission to re-enable this test.",
+            pytrace=False,
+        )
+
     def open_page(self):
+        self._require_access()
         log.info("Opening the Tracker Templates page")
         self.tt_link.click()
         self.page.wait_for_timeout(1250)

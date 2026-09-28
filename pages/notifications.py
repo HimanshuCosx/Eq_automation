@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 
 from playwright.sync_api import expect
 
@@ -13,16 +14,17 @@ class notifications:
 
     The page is reached from the header bell rather than the sidebar: the bell
     opens a popover carrying a "View all" link to the full list. The list
-    groups notifications by day (TODAY / YESTERDAY / …) and is driven by a tab
-    bar (All / Unread / Read), a search box, a multi-select Category filter and
-    a Date filter, with page-size and pagination controls at the foot.
+    groups notifications by day (Today / Yesterday / Earlier) and is driven by
+    a tab bar (All / Unread / Read), a multi-select Category filter and a Date
+    filter, with page-size and pagination controls at the foot. (Earlier builds
+    also had a "Search notifications..." box; it has been removed from the page
+    and its check was dropped with it.)
 
-    Almost everything here is read-only and self-resetting -- every filter is
-    cleared again so the list is left exactly as it was found. The exception is
-    marking notifications read: the app exposes no "mark as unread", so that
-    action is IRREVERSIBLE. It is therefore run last and only when unread
-    notifications actually exist; when the inbox is already all-read the step
-    logs and skips instead of failing, so the suite stays repeatable.
+    The workflow is entirely read-only and self-resetting -- every filter is
+    cleared again so the list is left exactly as it was found. Marking
+    notifications read is deliberately *not* clicked: the app exposes no "mark
+    as unread", so it is an irreversible write against shared staging data.
+    Its controls are validated in place instead (see `mark_as_read`).
     """
 
     def __init__(self, page):
@@ -39,9 +41,6 @@ class notifications:
         self.tab_all = page.get_by_role("button", name="All", exact=True)
         self.tab_unread = page.get_by_role("button", name=re.compile(r"^Unread"))
         self.tab_read = page.get_by_role("button", name=re.compile(r"^Read\b"))
-
-        # Search
-        self.search = page.get_by_placeholder("Search notifications...")
 
         # Filters
         self.category_btn = page.get_by_role("button", name=re.compile(r"^Category"))
@@ -82,12 +81,17 @@ class notifications:
         # message on other tabs/filters). Notification data is live, so a tab or
         # filter can legitimately resolve to an empty list between runs; this lets
         # the list be considered "settled" on either rows or an empty state.
+        # The Read tab's empty copy is "Nothing read yet", and a filter that
+        # matches nothing reads "No matching notifications".
         self.empty_any = page.get_by_text(
-            re.compile(r"No .*notifications|caught up", re.I)
+            re.compile(r"No .*notifications|caught up|Nothing read yet", re.I)
         ).first
 
         # A row or an empty state -- the list is "ready" once either is showing.
         self.list_ready = self.items.first.or_(self.empty_any)
+
+        # "Showing 1–10 of 255" -- the footer carries the tab's total.
+        self.showing = page.get_by_text(re.compile(r"^Showing \d+.\d+ of [\d,]+$"))
 
         # Page size + pagination
         self.page_size = page.get_by_role(
@@ -145,47 +149,111 @@ class notifications:
         log.info("Header bell navigation reached the notifications page")
 
     # ----------------------------------------------------------------- #
+    # Helpers
+    # ----------------------------------------------------------------- #
+    def _poll(self, predicate, timeout_ms=15000, interval_ms=250):
+        """Poll `predicate` until truthy (or timeout), returning its last value.
+
+        The list refetches on every tab and filter change, and the URL moves
+        before the new rows land, so expected *content* is polled for rather
+        than a fixed sleep. The deadline is wall-clock.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            self.page.wait_for_timeout(interval_ms)
+        return predicate()
+
+    def _total(self):
+        """The current list's total from its footer, 0 on an empty state.
+
+        None while neither is showing (mid-refetch).
+        """
+        try:
+            if self.showing.count():
+                text = self.showing.first.inner_text()
+                return int(text.rsplit(" of ", 1)[1].replace(",", ""))
+            if self.empty_any.count() and not self.items.count():
+                return 0
+        except Exception:
+            # The footer re-renders as the refetch lands; a read that catches
+            # it mid-repaint is simply "not settled yet".
+            pass
+        return None
+
+    def _unread_badge(self):
+        """The count on the Unread tab's badge (absent -> 0)."""
+        digits = re.sub(r"\D", "", self.tab_unread.inner_text() or "")
+        return int(digits) if digits else 0
+
+    def _switch_tab(self, tab, state, expected_total=None):
+        """Click a tab and wait until the list actually shows that tab.
+
+        The tab is carried in the URL (`?state=unread` / `?state=read`, absent
+        for All), but the rows only swap once the refetch lands -- and the
+        previous tab's rows satisfy a bare "rows or empty state" wait, so two
+        quick switches could otherwise leave the page on the wrong tab. When
+        the tab's total is known it is polled for as the proof of arrival.
+        """
+        tab.click()
+        if state:
+            self.page.wait_for_url(re.compile(rf"[?&]state={state}\b"), timeout=10000)
+        else:
+            self.page.wait_for_url(lambda u: "state=" not in u, timeout=10000)
+        if expected_total is not None:
+            assert self._poll(lambda: self._total() == expected_total), (
+                f"the {state or 'all'} tab should total {expected_total}, "
+                f"shows {self._total()}"
+            )
+        expect(self.list_ready).to_be_visible(timeout=10000)
+
+    # ----------------------------------------------------------------- #
     # Tabs
     # ----------------------------------------------------------------- #
     def browse_tabs(self):
-        # Wait for each tab to settle into rows or an empty state -- the data is
-        # live, so any tab can be empty on a given run.
+        """Step through the tabs, checking their totals agree.
+
+        The data is live, so any tab can be empty on a given run -- but the
+        three totals must always reconcile: Unread matches its tab badge, and
+        Read is whatever of All is not Unread.
+        """
+        assert self._poll(lambda: self._total() is not None), (
+            "the All tab never showed a total"
+        )
+        total = self._total()
+        # The badge paints from its own /notifications/counts call, which can
+        # land after the list. Give it a chance to appear; a genuinely empty
+        # unread inbox shows no badge, and the Unread tab's own total below
+        # then confirms the 0.
+        self._poll(lambda: self._unread_badge() > 0, timeout_ms=8000)
+        unread = self._unread_badge()
+        log.info("All tab: %s notification(s), badge says %s unread", total, unread)
+
         log.info("Switching to the Unread tab")
-        self.tab_unread.click()
-        expect(self.list_ready).to_be_visible(timeout=10000)
-        log.info("Unread tab: %s row(s)", self.items.count())
+        self._switch_tab(self.tab_unread, "unread", unread)
+        log.info("Unread tab: %s notification(s)", unread)
 
         log.info("Switching to the Read tab")
-        self.tab_read.click()
-        expect(self.list_ready).to_be_visible(timeout=10000)
-        log.info("Read tab: %s row(s)", self.items.count())
+        self._switch_tab(self.tab_read, "read", total - unread)
+        log.info("Read tab: %s notification(s)", total - unread)
 
         log.info("Switching back to the All tab")
-        self.tab_all.click()
-        expect(self.list_ready).to_be_visible(timeout=10000)
-
-    # ----------------------------------------------------------------- #
-    # Search
-    # ----------------------------------------------------------------- #
-    def browse_search(self):
-        before = self.items.count()
-
-        # A term that cannot match anything cleanly proves the search filters
-        # the list down to the empty state. The input is debounced, so poll for
-        # the empty list rather than sampling the count after a fixed wait.
-        log.info("Searching for a term that matches nothing")
-        self.search.fill("zzznomatchzzz")
-        expect(self.items).to_have_count(0, timeout=10000)
-
-        log.info("Clearing the search")
-        self.search.fill("")
-        expect(self.items).to_have_count(before, timeout=10000)
-        log.info("Search cleared, back to %s row(s)", before)
+        self._switch_tab(self.tab_all, None, total)
 
     # ----------------------------------------------------------------- #
     # Category filter (multi-select with Clear / Apply)
     # ----------------------------------------------------------------- #
-    def filter_by_category(self, category="Alert"):
+    def filter_by_category(self, category="Socket alert", param="socket_alert"):
+        """Filter to one category, then clear it again.
+
+        Pinned to "Socket alert" because that is the category staging's
+        notifications actually carry, so the filter is proven to *keep* the
+        matching rows rather than only to empty the list. The row badge is not
+        relied on: the backend gives socket_alert the same "Alert" pill as the
+        separate "alert" category, so the badge cannot tell the two apart, and
+        filtering on the plain "Alert" option returns nothing on staging.
+        """
         before = self.items.count()
 
         log.info("Opening the Category filter and selecting %r", category)
@@ -194,11 +262,14 @@ class notifications:
         opt = self.page.get_by_role("option", name=category, exact=True)
         opt.wait_for(state="visible", timeout=8000)
         opt.click()
-        self.apply_btn.wait_for(state="visible", timeout=8000)
+        expect(self.apply_btn).to_be_enabled(timeout=8000)
         self.apply_btn.click()
-        # Wait for the filter to actually take effect (list re-renders).
         self.dialog.wait_for(state="hidden", timeout=8000)
-        self.page.wait_for_timeout(600)
+        # The URL updates before the refetch lands, so wait on the query and
+        # then on the list itself, not a fixed delay.
+        self.page.wait_for_url(re.compile(rf"[?&]category={param}\b"), timeout=10000)
+        expect(self.items.first).to_be_visible(timeout=10000)
+        expect(self.category_btn).to_contain_text(category, timeout=8000)
         log.info("Category %r applied, list now shows %s row(s)",
                  category, self.items.count())
 
@@ -207,12 +278,16 @@ class notifications:
         self.dialog.wait_for(state="visible", timeout=8000)
         self.clear_btn.wait_for(state="visible", timeout=8000)
         self.clear_btn.click()
+        # Clear now commits the empty selection and closes the popover in one
+        # step; older builds kept it open and needed Apply as well.
         self.page.wait_for_timeout(400)
-        # Clear empties the selection; Apply commits the now-empty filter.
-        if self.apply_btn.count():
+        if self.apply_btn.count() and self.apply_btn.is_enabled():
             self.apply_btn.click()
+        if self.dialog.count():
+            self.page.keyboard.press("Escape")
+        self.page.wait_for_url(lambda u: "category=" not in u, timeout=10000)
         # Poll for the list to come back rather than sampling once.
-        expect(self.items).to_have_count(before, timeout=10000)
+        expect(self.items).to_have_count(before, timeout=15000)
         log.info("Category filter cleared, back to %s row(s)", before)
 
     # ----------------------------------------------------------------- #
@@ -255,13 +330,36 @@ class notifications:
         first.scroll_into_view_if_needed()
         title = first.get_attribute("aria-label")
         log.info("Opening the notification %r", title)
-        first.click()
-        # Each notification links to the resource it is about (a site, device,
-        # network status page, …), so the URL leaves /notifications.
-        self.page.wait_for_url(
-            lambda u: "/notifications" not in u, timeout=15000
-        )
+        # Opening a notification also marks it read (POST
+        # /notifications/<id>/read) -- an irreversible write, since there is
+        # no "mark as unread". That one request is aborted for the duration of
+        # the click: navigation does not wait on it, so the target is still
+        # reached while staging's unread inbox is left untouched. The attempt
+        # is recorded, which still proves opening is wired to mark-as-read.
+        mark_read = re.compile(r"/notifications/[^/?]+/read(\?|$)")
+        attempted = []
+
+        def block(route):
+            attempted.append(route.request.url)
+            route.abort()
+
+        self.page.route(mark_read, block)
+        try:
+            first.click()
+            # Each notification links to the resource it is about (a site,
+            # device, network status page, …), so the URL leaves /notifications.
+            self.page.wait_for_url(
+                lambda u: "/notifications" not in u, timeout=15000
+            )
+        finally:
+            self.page.unroute(mark_read, block)
         log.info("Notification opened its target: %s", self.page.url)
+        assert attempted, (
+            "opening a notification did not try to mark it read, though the "
+            "Read tab promises opened notifications show up there"
+        )
+        log.info("Opening tried to mark it read (blocked, not sent): %s",
+                 attempted[0])
 
         # Return to the list for the remaining steps.
         self.open_page()
@@ -272,72 +370,74 @@ class notifications:
     def paginate(self):
         current = (self.page_size.text_content() or "").strip()
         target = "20" if current != "20" else "50"
+        total = self._total() or 0
         log.info("Switching the page size from %s to %s", current, target)
         self.page_size.click()
         opt = self.page.get_by_role("option", name=target, exact=True)
         opt.wait_for(state="visible", timeout=8000)
         opt.click()
-        self.page.wait_for_timeout(1000)
+        # Poll for the page to actually hold the new number of rows (capped by
+        # the total) before switching back -- restoring while the first change
+        # is still in flight can leave the list on the wrong size.
+        expect(self.items).to_have_count(min(int(target), total), timeout=10000)
+        log.info("Page size %s shows %s row(s)", target, self.items.count())
 
         log.info("Restoring the page size to %s", current)
         self.page_size.click()
         opt = self.page.get_by_role("option", name=current, exact=True)
         opt.wait_for(state="visible", timeout=8000)
         opt.click()
-        expect(self.list_ready).to_be_visible(timeout=10000)
+        expect(self.items).to_have_count(min(int(current), total), timeout=10000)
 
         if self.next_page.is_enabled():
             log.info("Paging forward and back through the notification list")
+            # The footer's range ("Showing 11–20 of …") is what proves the page
+            # actually turned; the old rows would satisfy a bare "rows" wait.
+            size = int(current)
             self.next_page.click()
-            expect(self.list_ready).to_be_visible(timeout=10000)
+            self.page.wait_for_url(re.compile(r"[?&]page=2\b"), timeout=10000)
+            expect(self.showing).to_contain_text(
+                re.compile(rf"^Showing {size + 1}\D"), timeout=10000
+            )
             self.prev_page.click()
-            expect(self.list_ready).to_be_visible(timeout=10000)
+            self.page.wait_for_url(re.compile(r"[?&]page=1\b"), timeout=10000)
+            expect(self.showing).to_contain_text(
+                re.compile(r"^Showing 1\D"), timeout=10000
+            )
+            expect(self.items).to_have_count(min(size, total), timeout=10000)
         else:
             log.info("Only one page of notifications, skipping pagination")
 
     # ----------------------------------------------------------------- #
-    # Mark as read (IRREVERSIBLE -- guarded, runs last)
+    # Mark as read (IRREVERSIBLE -- validated, never clicked)
     # ----------------------------------------------------------------- #
     def mark_as_read(self):
-        """Exercise the mark-as-read actions when unread notifications exist.
+        """Validate the mark-as-read controls without using them.
 
-        There is no way to mark a notification unread again, so this only acts
-        when there is something unread to act on -- it marks one item read via
-        its per-item control, confirms the unread list shrank, then clears the
-        rest with "Mark all as read". On an already-read inbox it logs and
-        skips so the suite still passes and never mutates state pointlessly.
+        There is no way to mark a notification unread again, so clicking either
+        control would permanently change shared staging data (and "Mark all as
+        read" would wipe the whole unread inbox in one go). Instead this checks,
+        on the Unread tab, that every unread row carries its own per-item
+        "Mark "<title>" as read" control and that "Mark all as read" is on offer
+        and enabled. On an already-read inbox it checks the empty state instead.
         """
-        log.info("Switching to the Unread tab to check for unread notifications")
-        self.tab_unread.click()
-        self.page.wait_for_timeout(900)
+        log.info("Switching to the Unread tab to check the mark-as-read controls")
+        self._switch_tab(self.tab_unread, "unread", self._unread_badge())
 
         unread = self.items.count()
         if unread == 0:
-            log.info("No unread notifications -- skipping the (irreversible) "
-                     "mark-as-read actions")
+            log.info("No unread notifications -- checking the empty state only")
             expect(self.caught_up).to_be_visible()
-            self.tab_all.click()
-            self.page.wait_for_timeout(600)
-            return
-
-        log.info("%s unread notification(s); marking the first one as read", unread)
-        self.item_mark_read.first.click()
-        expect(self.items).to_have_count(unread - 1, timeout=8000)
-        after_one = unread - 1
-        log.info("One notification marked read, %s unread remaining", after_one)
-
-        if after_one > 0:
-            # Wait for the control to be actionable (it re-renders after the
-            # per-item mark) before clicking, rather than racing it.
+        else:
+            # One per-item control per unread row: a row without one could not
+            # be marked read on its own.
+            expect(self.item_mark_read).to_have_count(unread, timeout=8000)
             expect(self.mark_all_read).to_be_enabled(timeout=8000)
-            log.info("Marking all remaining notifications as read")
-            self.mark_all_read.click()
-            expect(self.items).to_have_count(0, timeout=8000)
-            expect(self.caught_up).to_be_visible()
-            log.info("Inbox is now all caught up")
+            log.info("%s unread row(s) each offer a per-item mark-as-read, and "
+                     "'Mark all as read' is enabled (neither clicked -- "
+                     "irreversible)", unread)
 
-        self.tab_all.click()
-        self.page.wait_for_timeout(600)
+        self._switch_tab(self.tab_all, None)
 
     # ----------------------------------------------------------------- #
     # Full workflow
@@ -349,7 +449,6 @@ class notifications:
         # direct loads the earlier steps depend on.
         self.open_page()
         self.browse_tabs()
-        self.browse_search()
         self.filter_by_category()
         self.filter_by_date()
         self.open_notification_target()

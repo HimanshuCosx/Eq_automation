@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from datetime import datetime
 
 from playwright.sync_api import expect
 
@@ -53,10 +54,32 @@ class driver_dashboard:
 
     # Note the two Revenue columns carry no "(£)" suffix: the currency is
     # chosen once in the app header (the "GBP (£)" selector) rather than
-    # repeated per column, so the headings are the bare words.
+    # repeated per column, so the headings are the bare words. "Revenue" is the
+    # selected window's revenue; "Lifetime Revenue" (formerly headed "Revenue
+    # Total") is the driver's all-time figure, independent of the window.
     COLUMNS = ["Driver", "Type", "Status", "Charge Keys", "Sessions",
-               "Energy (kWh)", "Revenue", "Revenue Total",
+               "Energy (kWh)", "Revenue", "Lifetime Revenue",
                "Last Session", "First Charged"]
+
+    # The shape every cell in each column must take, keyed by heading. Cells
+    # are matched by heading rather than by position, so a column being added,
+    # renamed or reordered fails the column-set check above with a clear
+    # message instead of silently shifting every value check by one. A date
+    # column may read "—" for a driver with no qualifying session.
+    _MONEY = r"£[\d,]+\.\d{2}"
+    _DATE = r"(\d{1,2} [A-Z][a-z]{2} \d{4}|—|-)"
+    CELL_SHAPES = {
+        "Driver": r"\S.*",
+        "Type": None,  # checked against DRIVER_TYPE_OPTIONS below
+        "Status": None,  # checked against STATUS_OPTIONS below
+        "Charge Keys": r"[\d,]+",
+        "Sessions": r"[\d,]+",
+        "Energy (kWh)": r"[\d,]+(\.\d+)?",
+        "Revenue": _MONEY,
+        "Lifetime Revenue": _MONEY,
+        "Last Session": _DATE,
+        "First Charged": _DATE,
+    }
 
     # Sortable columns and the `sort_by` value each sends.
     SORTABLE = {
@@ -66,10 +89,10 @@ class driver_dashboard:
         "Last Session": "last_session",
         "First Charged": "first_charged",
     }
-    # Everything else in the header is deliberately not sortable. Note Revenue
-    # Total is not, even though Revenue beside it is.
+    # Everything else in the header is deliberately not sortable. Note Lifetime
+    # Revenue is not, even though Revenue beside it is.
     NOT_SORTABLE = ["Driver", "Type", "Status", "Charge Keys",
-                    "Revenue Total"]
+                    "Lifetime Revenue"]
 
     STATUS_OPTIONS = ["Active", "Inactive", "Never charged"]
     DRIVER_TYPE_OPTIONS = ["App", "RFID", "One-time", "Payment terminal",
@@ -82,7 +105,9 @@ class driver_dashboard:
         "Quarter to date (QTD)", "Year to date (FY)", "Custom",
     ]
 
-    PAGE_SIZES = ["15", "20", "50", "100"]
+    # The page-size selector's options. The list now opens at 10 rows (it used
+    # to open at 15, which is no longer offered).
+    PAGE_SIZES = ["10", "20", "50", "100"]
 
     # Map view controls.
     MAP_METRICS = ["Sessions", "Revenue", "Energy (kWh)"]
@@ -130,7 +155,7 @@ class driver_dashboard:
 
         # Pagination
         self.page_size = page.get_by_role(
-            "button", name=re.compile(r"^(15|20|50|100)$")
+            "button", name=re.compile(r"^(10|20|50|100)$")
         )
         self.next_page = page.get_by_role("button", name="Go to next page")
         self.prev_page = page.get_by_role("button", name="Go to previous page")
@@ -250,6 +275,46 @@ class driver_dashboard:
             self.page.wait_for_timeout(400)
         return self._names()
 
+    def _column_keys(self, col):
+        """The sortable values of column `col` on the current page, top down.
+
+        Read in one evaluate so a mid-refetch repaint cannot mix two renders.
+        Numbers and money parse to floats and dates to `datetime`s; a blank
+        or "—" cell becomes None and is left out of ordering checks.
+        """
+        index = self.COLUMNS.index(col)
+        try:
+            texts = self.table.evaluate("""(t, i) =>
+                [...t.querySelectorAll(':scope > tbody > tr')]
+                    .map(r => (r.querySelectorAll(':scope > td')[i]?.innerText || '').trim())""",
+                index)
+        except Exception:
+            return []
+        keys = []
+        for text in texts:
+            if re.fullmatch(r"\d{1,2} [A-Z][a-z]{2} \d{4}", text):
+                keys.append(datetime.strptime(text, "%d %b %Y"))
+            elif re.fullmatch(r"£?[\d,]+(\.\d+)?", text):
+                keys.append(float(re.sub(r"[£,]", "", text)))
+            else:
+                keys.append(None)
+        return keys
+
+    def _sorted_by(self, col, order):
+        """True once the page's rows are ordered by `col` in `order`.
+
+        This is what proves a sort click has actually landed: the URL flips
+        first and the old rows linger until the refetch arrives, so a read
+        taken straight after the URL change can still be the *previous* order.
+        """
+        keys = [k for k in self._column_keys(col) if k is not None]
+        if not keys or not self._loaded():
+            return False
+        pairs = list(zip(keys, keys[1:]))
+        if order == "asc":
+            return all(a <= b for a, b in pairs)
+        return all(a >= b for a, b in pairs)
+
     def _loaded(self):
         return self.rows.count() > 0 and all(self._names())
 
@@ -344,11 +409,46 @@ class driver_dashboard:
         assert self.rows.count() == size, (
             f"expected {size} rows on page 1, got {self.rows.count()}"
         )
-        # Every row identifies its driver and states a session count.
-        for row in self.rows.all():
-            driver = (row.locator("td").first.inner_text() or "").strip()
-            assert driver, "a row has no driver ID"
-        log.info("Table shows %s driver row(s)", self.rows.count())
+        # Every cell takes the shape its column promises. The body is read in
+        # one evaluate rather than row by row: the table re-renders when a
+        # background refetch lands, and a per-row locator read across that
+        # repaint can pair one render's cells with another's.
+        cells = self.table.evaluate("""t => [...t.querySelectorAll(':scope > tbody > tr')]
+            .map(r => [...r.querySelectorAll(':scope > td')]
+                .map(c => (c.innerText || '').trim().split('\\n')[0]))""")
+        enums = {"Type": self.DRIVER_TYPE_OPTIONS, "Status": self.STATUS_OPTIONS}
+        for row in cells:
+            assert len(row) == len(self.COLUMNS), (
+                f"a row has {len(row)} cells for {len(self.COLUMNS)} columns: {row}"
+            )
+            values = dict(zip(self.COLUMNS, row))
+            for col, value in values.items():
+                pattern = self.CELL_SHAPES[col]
+                if pattern is None:
+                    # Matched case-insensitively: these render as badges whose
+                    # text may be CSS-transformed.
+                    assert value.lower() in [o.lower() for o in enums[col]], (
+                        f"driver {values['Driver']!r} has {col} {value!r}, not "
+                        f"one of {enums[col]}"
+                    )
+                else:
+                    assert re.fullmatch(pattern, value), (
+                        f"driver {values['Driver']!r} shows {col} {value!r}, "
+                        f"which does not match the expected shape {pattern!r}"
+                    )
+            # A driver's all-time revenue includes the selected window, so it
+            # can never be the smaller of the two.
+            window, lifetime = (
+                float(re.sub(r"[£,]", "", values[c]))
+                for c in ("Revenue", "Lifetime Revenue")
+            )
+            assert lifetime >= window, (
+                f"driver {values['Driver']!r} has Lifetime Revenue "
+                f"{values['Lifetime Revenue']} below its in-window Revenue "
+                f"{values['Revenue']}"
+            )
+        log.info("Table shows %s driver row(s), every cell well-formed; "
+                 "first row: %s", len(cells), dict(zip(self.COLUMNS, cells[0])))
 
     # ----------------------------------------------------------------- #
     # Filters
@@ -519,13 +619,19 @@ class driver_dashboard:
             self.page.wait_for_url(
                 re.compile(rf"[?&]sort_by={param}\b"), timeout=15000
             )
-            assert self._poll(self._loaded, timeout_ms=20000), (
-                f"the table is empty after sorting by {col!r}"
-            )
-            first_direction = self._settled_names()
             direction = re.search(r"sort_order=(asc|desc)", self.page.url)
             assert direction, f"sorting by {col!r} set no sort_order: {self.page.url}"
-            opposite = "desc" if direction.group(1) == "asc" else "asc"
+            order = direction.group(1)
+            opposite = "desc" if order == "asc" else "asc"
+            # Wait for rows genuinely in that order before taking the baseline:
+            # the default view is already Sessions-descending, so a baseline
+            # read before the refetch lands is the old order, and the reverse
+            # below then "fails" to change it.
+            assert self._poll(lambda: self._sorted_by(col, order), timeout_ms=20000), (
+                f"sorting by {col!r} {order} did not order the rows: "
+                f"{self._column_keys(col)}"
+            )
+            first_direction = self._settled_names()
 
             self._park_mouse()
             self._header(col).click()
@@ -538,9 +644,13 @@ class driver_dashboard:
                 timeout=15000,
             )
             assert self._poll(
-                lambda a=first_direction: self._names() and self._names() != a,
+                lambda a=first_direction: self._names() and self._names() != a
+                and self._sorted_by(col, opposite),
                 timeout_ms=20000,
-            ), f"reversing the {col!r} sort did not reorder the table"
+            ), (
+                f"reversing the {col!r} sort did not reorder the table "
+                f"{opposite}: {self._column_keys(col)}"
+            )
             log.info("Column %-17s sorts both ways (sort_by=%s)", col, param)
 
         # The negative control is checked structurally for every column: a
@@ -558,11 +668,11 @@ class driver_dashboard:
                 f"{col} carries a sort indicator but is not in SORTABLE"
             )
 
-        # Then prove it behaviourally on one of them. Revenue Total is chosen
+        # Then prove it behaviourally on one of them. Lifetime Revenue is chosen
         # because it sits at the right-hand end of the table, well clear of the
         # sidebar -- and because it is the interesting case: the Revenue column
         # immediately beside it *is* sortable.
-        col = "Revenue Total"
+        col = "Lifetime Revenue"
         before = self._settled_names()
         url = self.page.url
         self._park_mouse()

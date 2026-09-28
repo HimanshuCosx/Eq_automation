@@ -24,6 +24,10 @@ class repository:
     """
 
     # Every category shown in the tab bar. "All Records" is the default view.
+    # The tabs are real ARIA tabs (role="tab") whose accessible name carries
+    # the category's document count once it holds any -- "Survey (04)" -- and
+    # the bare label when it is empty ("M-PPM"). They are always located
+    # through `_tab`, which accepts either form.
     CATEGORIES = [
         "Survey",
         "Legal",
@@ -53,7 +57,7 @@ class repository:
         self.grid_view = page.get_by_role("button", name="Grid view")
 
         # Category tab bar. "All Records" resets to the unfiltered view.
-        self.all_records_tab = page.get_by_role("button", name="All Records", exact=True)
+        self.all_records_tab = self._tab("All Records")
 
         # List-view table. In list view every document is a table row; the
         # header carries the six columns Document / Type / Linked To / Size /
@@ -67,11 +71,12 @@ class repository:
         ]
         self.SORTABLE_COLUMNS = ["Document", "Linked To", "Size", "Uploaded"]
 
-        # Sub-Org filter. The trigger is relabelled to "Sub-Org: <name>" once a
-        # sub-org is picked, so re-opening it is matched on the leading text.
-        # The trigger renders its label above its current value, so the
-        # accessible name is the two run together ("CPO All CPOs").
-        # Anchored on the label so it keeps resolving once a value is set.
+        # Sub-Org filter. The trigger renders its label above its current
+        # value, so the accessible name is the two run together: "Sub-Org All
+        # sub-orgs" when unfiltered, "Sub-Org <name> Remove <name>" once a
+        # sub-org is picked (the applied value grows its own nested "Remove
+        # <name>" chip button). Anchored on the label so it keeps resolving in
+        # either state.
         self.suborg_trigger = page.get_by_role(
             "button", name=re.compile(r"^Sub-Org\b")
         ).first
@@ -79,6 +84,9 @@ class repository:
             "button", name=re.compile(r"^Sub-Org")
         ).first
         self.suborg_search = page.get_by_placeholder("Search sub-orgs…")
+        self.suborg_unfiltered = page.get_by_role(
+            "button", name="Sub-Org All sub-orgs", exact=True
+        )
 
         # Details side panel. It shares role="dialog" with the sub-org popover,
         # so it is always identified by its own "Close panel" control.
@@ -111,6 +119,23 @@ class repository:
     # ----------------------------------------------------------------- #
     # Helpers
     # ----------------------------------------------------------------- #
+    def _tab(self, cat):
+        """The category tab for `cat`, with or without its "(NN)" count.
+
+        The count suffix appears and disappears with the category's contents
+        (and changes whenever a document is uploaded), so the name is anchored
+        on the label and the suffix is optional -- an exact name would break
+        the day a category gains its first file.
+        """
+        return self.page.get_by_role(
+            "tab", name=re.compile(rf"^{re.escape(cat)}( \(\d+\))?$")
+        )
+
+    def _tab_count(self, cat):
+        """The document count the tab for `cat` advertises (0 when it shows none)."""
+        found = re.search(r"\((\d+)\)$", self._tab(cat).first.inner_text() or "")
+        return int(found.group(1)) if found else 0
+
     def _card_count(self):
         """Number of document cards/rows currently rendered.
 
@@ -169,7 +194,10 @@ class repository:
 
         log.info("Searching documents for 'Boarding', then clearing the search")
         self.search.fill("Boarding")
-        assert self._poll(lambda: self._card_count() < before), (
+        # Lower-bounded as well: the list blanks to zero cards for a beat while
+        # the search refetches, and "fewer than before" alone would accept
+        # that transient empty list as the result.
+        assert self._poll(lambda: 0 < self._card_count() < before), (
             f"expected the search to narrow the list from {before}, "
             f"got {self._card_count()}"
         )
@@ -193,14 +221,26 @@ class repository:
     def browse_categories(self):
         log.info("Stepping through every category tab")
         for cat in self.CATEGORIES:
-            tab = self.page.get_by_role("button", name=cat, exact=True)
+            tab = self._tab(cat)
+            advertised = self._tab_count(cat)
             tab.click()
-            self.page.wait_for_timeout(600)
+            expect(tab).to_have_attribute("aria-selected", "true")
+            # The tab's own count is what the user is promised; the list must
+            # draw exactly that many (every category fits on one page here).
+            assert self._poll(lambda a=advertised: self._card_count() == a), (
+                f"the {cat!r} tab advertises {advertised} document(s) but the "
+                f"list shows {self._card_count()}"
+            )
             log.info("Category %-13s -> %s document(s)", cat, self._card_count())
 
         log.info("Returning to the All Records tab")
+        total = self._tab_count("All Records")
         self.all_records_tab.click()
-        self.page.wait_for_timeout(600)
+        expect(self.all_records_tab).to_have_attribute("aria-selected", "true")
+        assert self._poll(lambda: self._card_count() == total), (
+            f"the All Records tab advertises {total} document(s) but the list "
+            f"shows {self._card_count()}"
+        )
 
     # ----------------------------------------------------------------- #
     # List-view table: structure, sorting and in-table filtering
@@ -279,9 +319,14 @@ class repository:
         full = self.table_rows.count()
 
         log.info("Filtering the table by category (Survey)")
-        self.page.get_by_role("button", name="Survey", exact=True).click()
-        assert self._poll(lambda: 0 < self.table_rows.count() <= full), (
-            f"Survey category should narrow the table (of {full})"
+        survey = self._tab_count("Survey")
+        self._tab("Survey").click()
+        # Pinned to the tab's own count rather than "no more than before": the
+        # table still holds all of its rows for a beat after the click, and a
+        # bound that the unfiltered table already satisfies proves nothing.
+        assert self._poll(lambda: self.table_rows.count() == survey), (
+            f"the Survey tab advertises {survey} document(s) but the table "
+            f"shows {self.table_rows.count()} row(s) (of {full})"
         )
         log.info("Survey category shows %s table row(s)", self.table_rows.count())
         self.all_records_tab.click()
@@ -291,7 +336,7 @@ class repository:
 
         log.info("Filtering the table with a search term ('Boarding')")
         self.search.fill("Boarding")
-        assert self._poll(lambda: self.table_rows.count() < full), (
+        assert self._poll(lambda: 0 < self.table_rows.count() < full), (
             f"search should narrow the table from {full}"
         )
         log.info("Search narrowed the table to %s row(s)", self.table_rows.count())
@@ -309,11 +354,13 @@ class repository:
     def filter_by_suborg(self, suborg="Mid Suffolk Council"):
         """Apply a sub-org filter, confirm it took, then toggle it back off.
 
-        Selecting a sub-org relabels the trigger to "Sub-Org: <name>", which is
-        the proof the filter applied. Every sub-org currently narrows the list
-        to its own document set (an empty state on staging), and re-selecting
-        the same option toggles the filter off and restores the full list -- so
-        the page is always left unfiltered.
+        Selecting a sub-org relabels the trigger to carry the chosen name and
+        a "Remove <name>" chip, which is the proof the filter applied. Every
+        sub-org currently narrows the list to its own document set (an empty
+        state on staging). Re-selecting the same option toggles the filter off
+        and restores the full list; the filter is then applied once more and
+        dropped through the chip, so both ways off are covered and the page is
+        always left unfiltered.
         """
         before = self._card_count()
 
@@ -330,9 +377,15 @@ class repository:
         self.page.wait_for_timeout(900)
 
         # The trigger is relabelled to the chosen sub-org once the filter applies.
+        remove_chip = self.page.get_by_role(
+            "button", name=f"Remove {suborg}", exact=True
+        )
         expect(
-            self.page.get_by_role("button", name=f"Sub-Org: {suborg}")
+            self.page.get_by_role(
+                "button", name=re.compile(rf"^Sub-Org {re.escape(suborg)}\b")
+            )
         ).to_be_visible()
+        expect(remove_chip).to_be_visible()
         log.info("Sub-Org filter applied, list now shows %s document(s)",
                  self._card_count())
 
@@ -345,12 +398,42 @@ class repository:
         self.page.wait_for_timeout(900)
 
         # Back to the neutral "Sub-Org" trigger and the original document count.
-        expect(self.suborg_trigger).to_be_visible()
+        expect(self.suborg_unfiltered).to_be_visible()
+        # Unlike a selection, which closes the popover, toggling an option off
+        # leaves it open. Close it explicitly: clicking the trigger to re-open
+        # it would instead start it closing, and anything typed into its search
+        # box would race the exit animation and detach the option mid-click.
+        if self.suborg_search.count():
+            self.page.keyboard.press("Escape")
+            expect(self.suborg_search).to_have_count(0)
         assert self._poll(lambda: self._card_count() == before), (
             f"expected {before} document(s) after clearing the sub-org filter, "
             f"got {self._card_count()}"
         )
         log.info("Sub-Org filter cleared, back to %s document(s)", self._card_count())
+
+        log.info("Re-applying %r and removing it through its chip", suborg)
+        self.suborg_trigger_any.click()
+        self.suborg_search.wait_for(state="visible", timeout=5000)
+        self.suborg_search.fill(suborg)
+        # The option list re-renders as the search narrows it, detaching the
+        # option mid-click; wait for it to settle on the one match first.
+        assert self._poll(
+            lambda: self.page.get_by_role("option").count() == 1
+        ), f"searching the sub-org list for {suborg!r} did not narrow it to one"
+        self.page.get_by_role("option", name=suborg, exact=True).click()
+        expect(remove_chip).to_be_visible()
+        # The popover may still be open over the chip after a selection.
+        if self.suborg_search.count():
+            self.page.keyboard.press("Escape")
+            expect(self.suborg_search).to_have_count(0)
+        remove_chip.click()
+        expect(self.suborg_unfiltered).to_be_visible()
+        assert self._poll(lambda: self._card_count() == before), (
+            f"expected {before} document(s) after removing the sub-org chip, "
+            f"got {self._card_count()}"
+        )
+        log.info("Sub-Org chip removed, back to %s document(s)", self._card_count())
 
     # ----------------------------------------------------------------- #
     # Details panel

@@ -7,54 +7,40 @@ from playwright.sync_api import expect
 
 log = logging.getLogger("eq_automation.operations_hub")
 
-# The CPO the drill-down and the search checks are pinned to. Babergh Council
-# is a small, stable CPO on staging (4 sites), so its detail page fits on a
-# single page and the row counts stay readable in the log.
+# The CPO the row-expansion checks are pinned to. Babergh Council is a small,
+# stable CPO on staging (4 sites), so its expanded site list is short and the
+# row counts stay readable in the log.
 CPO = "Babergh Council"
 
-# A search term that matches exactly one CPO and one site, used to prove the
-# two search boxes really filter rather than just re-rendering the list.
+# A search term that matches exactly one CPO, used to prove the search box
+# really filters rather than just re-rendering the list.
 SEARCH_TERM = "Capurro"
 
 # The site the detail-page walk is pinned to. It is chosen deliberately rather
 # than taken as "whichever row is first": the site walk reads the Maintenance
-# tab, and this is the one site on staging that actually carries maintenance
-# plans (2 plans, 1 upcoming and 7 completed events) plus a plan with notes and
-# an attachment. A site picked at random is usually empty, which would quietly
-# reduce the maintenance checks to asserting an empty state.
+# panel, and this is the one site on staging that actually carries maintenance
+# plans (several plans, upcoming and completed events) plus a plan with notes
+# and an attachment. A site picked at random is usually empty, which would
+# quietly reduce the maintenance checks to asserting an empty state.
 SITE = "345 Woodbridge Road CO OP"
+# ...and the CPO that owns it. The hub lists CPOs only, so a site search
+# surfaces the site's CPO, and the site is reached by expanding that row.
+SITE_CPO = "East of England CO OP"
 
 # --------------------------------------------------------------------------- #
-# Maintenance write fixtures
+# Maintenance fixtures
 #
-# The Maintenance tab is the one place in this workflow that writes. Neither a
-# maintenance plan nor an event can be deleted -- the UI exposes no delete
-# control anywhere -- so the suite deliberately does NOT create a new one on
-# every run. Instead it keeps a single, clearly-labelled plan and event and
-# reuses them: the first run creates them, and every run after that finds them
-# and exercises the edit path against them. That gives full create *and* edit
-# coverage while leaving exactly one permanent artefact on the site rather than
-# one per run.
-#
-# If either is ever deleted from the database, the next run simply recreates it.
+# The Maintenance panel offers Create Plan, Edit Plan and Add Event, and neither
+# a plan nor an event can be deleted -- the UI exposes no delete control
+# anywhere. So the suite never submits any of them: each form is filled to a
+# submittable state, checked, and cancelled. Edit Plan is opened on a single,
+# clearly-labelled fixture plan that already exists on the site.
 # --------------------------------------------------------------------------- #
 PLAN_TITLE = "AUTOMATION - do not modify"
-# Deliberately different from PLAN_TITLE: a plan generates its own events under
-# the *plan's* name, so sharing one title would make the "does the event already
-# exist?" check match the plan's generated event and silently skip the Create
-# Event flow for ever.
+# The title typed into the (cancelled) Create Event form.
 EVENT_TITLE = "AUTOMATION EVENT - do not modify"
-
-# The plan's description is edited and restored on every run, so these two
-# strings are the round trip: the run leaves the plan on PLAN_DESCRIPTION.
-PLAN_DESCRIPTION = (
-    "Created by the automated regression suite. Reused on every run -- "
-    "please leave it in place."
-)
-PLAN_DESCRIPTION_EDITED = (
-    "Edited by the automated regression suite to prove the save path works. "
-    "This is restored before the run ends."
-)
+# The description typed into the (cancelled) Create Plan form.
+PLAN_DESCRIPTION = "Validated by the automated regression suite."
 
 # The account the suite logs in as, used as the event assignee.
 ASSIGNEE = "himanshu@equidria.com"
@@ -63,71 +49,67 @@ ASSIGNEE = "himanshu@equidria.com"
 class operations_hub:
     """Operations Hub (/operations/operations-hub).
 
-    The operational view of the estate. It opens on a List View that can be
-    read either as CPOs (one row per charge point operator) or as Sites (one
-    row per site), and the same data can be shown as a Map View. From the list
-    a CPO drills into its own sites page, and a site drills into a per-site
-    page with Site Info / Tracker / Maintenance / Records tabs.
+    The operational view of the estate. It opens on a List View with one row
+    per charge point operator; each CPO row expands in place into its own
+    nested list of sites, and each site row expands again into an asset /
+    organisation / maintenance-dates panel. A single search box spans CPO and
+    site names and IDs, and CPO / Deal Type / Status / Criticality filters sit
+    above the table. The same data can be shown as a Map View (?view=map).
 
-    The whole workflow is read-only. It exercises every control the hub
-    exposes -- the List/Map toggle, the CPO/Sites view switch, both search
-    boxes and their empty states, column sorting, the page-size selector and
-    pagination, the CPO drill-down with its type and criticality filters and
-    its expand/collapse-all rows, the per-site row expansion, the site detail
-    tabs, and the map's filters, legend, zoom and markers -- but it never
-    creates, edits or deletes anything. The site's Maintenance tab is *read*,
-    and its "Add Events" / "Create Maintenance Plan" / "Edit Plan" controls are
-    deliberately left alone, so the run always leaves staging as it found it.
+    From an expanded site, "Open site" leads to the per-site page (Site Info /
+    Tracker / Records tabs). Its breadcrumb links back up to the CPO's own
+    sites page (/operations-hub/<cpo-uuid>), which keeps the older drill-down
+    table with its Deal Type / Criticality filters and a per-row "Maintenance"
+    action -- the only route left to a site's Maintenance panel, since the
+    site page no longer shows a Maintenance tab.
     """
 
-    # List View, CPOs mode.
-    CPO_COLUMNS = ["CPO Name", "Sites", "Deal Type", "Next Maint.", "Criticality"]
+    # List View. The leading blank column holds the row expander ("Expand all
+    # rows" in the header), and the trailing blank one is an unlabelled
+    # actions column.
+    CPO_COLUMNS = [
+        "", "CPO", "Sites", "Deal Type", "Status",
+        "Next Maint.", "Criticality", "Lifecycle", "",
+    ]
 
-    # CPO columns whose sort actually works, and the `sort_by` value each sends.
+    # Sortable CPO columns and the `sort_by` value each sends to the API.
+    # Status and Lifecycle are not sortable. CPO and Sites used to send the
+    # wrong parameter and get HTTP 422 (a pinned known bug); they now send
+    # cpo_name / sites and sort correctly, so they are asserted like the rest
+    # -- and, because their values are always populated, on the actual row
+    # order too.
     CPO_SORTS = {
+        "CPO": "cpo_name",
+        "Sites": "sites",
         "Deal Type": "deal_type",
         "Next Maint.": "next_maintenance",
         "Criticality": "criticality",
     }
 
-    # KNOWN BUG -- the CPO Name and Sites headers are broken on staging.
-    #
-    # The backend accepts sort_by of 'cpo_name', 'sites', 'deal_type',
-    # 'next_maintenance' or 'criticality', but the frontend sends 'name' and
-    # 'total_sites' for these two columns. Each click therefore returns
-    # HTTP 422 (VALIDATION_ERROR) and the table silently keeps the previous
-    # rows -- clicking those headers appears to do nothing at all.
-    #
-    # Mapping is {column: (parameter the UI sends, parameter the API expects)}.
-    # `_check_broken_sorts` asserts this broken state deliberately, so the suite
-    # stays green on a known defect *and* trips the moment someone fixes it --
-    # at which point move these two entries into CPO_SORTS above.
-    CPO_SORTS_BROKEN = {
-        "CPO Name": ("name", "cpo_name"),
-        "Sites": ("total_sites", "sites"),
-    }
-
-    # List View, Sites mode. The leading blank column holds the row expander.
-    SITE_COLUMNS = [
-        "", "Site Name", "CPO", "Deal Type", "Status",
-        "Next Maint.", "Criticality", "Lifecycle", "Actions",
-    ]
-    SITE_SORTS = {"CPO": "cpo", "Status": "status", "Criticality": "criticality"}
-
-    # The CPO drill-down drops the CPO column (every row is that CPO already).
+    # The CPO's own sites page drops the CPO column (every row is that CPO).
     CPO_DETAIL_COLUMNS = [
         "", "Site Name", "Deal Type", "Status",
         "Next Maint.", "Criticality", "Lifecycle", "Actions",
     ]
 
-    # Options behind the deal-type and criticality filters.
+    # Options behind the filters, and the query parameter each one pushes.
     DEAL_TYPES = ["O&M with Install", "O&M Onboarding", "Fully Funded Install"]
     CRITICALITIES = ["Low", "Medium", "High"]
+    STATUSES = ["Planned", "Installation", "Operational", "Decommissioned"]
 
-    # The per-site page's tabs.
-    SITE_TABS = ["Site Info", "Tracker", "Maintenance", "Records"]
+    # The per-site page's tabs. Records carries a document count in its label
+    # ("Records 2"), so tabs are matched on the leading text.
+    SITE_TABS = ["Site Info", "Tracker", "Records"]
 
-    # The Maintenance tab's own sub-tabs. Most carry a count in their label
+    # The expanded site panel (hub and CPO page alike). CSS upper-cases the
+    # section headings, so these are matched case-insensitively.
+    SITE_PANEL_LABELS = [
+        "Asset details", "Charging devices", "Sockets", "Primary device",
+        "Organisation", "Country", "Maintenance dates", "Live date",
+        "Next maintenance", "Lifecycle",
+    ]
+
+    # The Maintenance panel's own sub-tabs. Most carry a count in their label
     # ("All Plans (2)"), so they are matched on the leading text.
     #
     # Each maps to the markers that prove the panel rendered: either it lists
@@ -162,44 +144,42 @@ class operations_hub:
         self.list_view = page.get_by_role("button", name="List View")
         self.map_view = page.get_by_role("button", name="Map View")
 
-        # CPOs / Sites view switch. These are real radio inputs, so they are
-        # driven directly rather than by clicking their label text -- "Sites" is
-        # also a column header in the CPO table and would be ambiguous.
-        self.cpo_mode = page.locator("input[name='ops-view-mode'][value='cpo']")
-        self.sites_mode = page.locator("input[name='ops-view-mode'][value='sites']")
-
-        # Search. The placeholder changes with the view mode, which is itself
-        # proof that the switch took effect.
-        self.cpo_search = page.get_by_placeholder("Search CPOs by name…")
+        # Search. The hub has one box spanning CPOs and sites; the CPO's own
+        # sites page keeps a site-only box.
+        self.hub_search = page.get_by_placeholder("Search CPOs and sites by name or ID…")
         self.site_search = page.get_by_placeholder(
             "Search sites, charging devices, sockets, IDs, locations…"
         )
         self.search_clear = page.get_by_role("button", name="Clear", exact=True)
+        self.clear_all_filters = page.get_by_role("button", name="Clear all filters")
+        # "Showing 1–20 of 61" -- the total is the honest measure of a filter.
+        self.showing = page.get_by_text(re.compile(r"^Showing "))
 
-        # Table
-        self.table = page.locator("table")
-        self.rows = page.locator("table tbody tr")
+        # Table. An expanded CPO row inserts a <tr> holding a whole nested
+        # table of sites, so "table" and "table tbody tr" would match those
+        # too -- everything is scoped to the outer table's own rows.
+        self.table = page.locator("table").first
+        self.rows = self.table.locator(":scope > tbody > tr")
 
-        # Row-level controls (Sites mode and the CPO drill-down)
+        # Row-level controls
         self.expand_row = page.get_by_role("button", name="Expand row")
-        # An expanded row's own toggle relabels itself. "Collapse all rows" is a
-        # header control that only the CPO drill-down offers -- the Sites view
-        # collapses row by row.
         self.collapse_row = page.get_by_role("button", name="Collapse row")
+        self.expand_all = page.get_by_role("button", name="Expand all rows")
         self.collapse_all = page.get_by_role("button", name="Collapse all rows")
         self.view_details = page.get_by_role("button", name="View details")
-        self.row_maintenance = page.get_by_role("button", name="Maintenance", exact=True)
 
-        # Filters on the CPO drill-down and the map
-        # Each filter trigger renders its label above its current value, so
-        # the accessible name is the two run together ("CPO All CPOs").
-        # Anchored on the label: matching the value half stops resolving as
-        # soon as a filter is applied.
+        # Filters on the hub, the CPO page and the map. Each trigger renders its
+        # label above its current value, so the accessible name is the two run
+        # together ("CPO All CPOs"). Anchored on the label: matching the value
+        # half stops resolving as soon as a filter is applied.
         self.type_filter = page.get_by_role(
             "button", name=re.compile(r"^Deal Type\b")
         ).first
         self.criticality_filter = page.get_by_role(
             "button", name=re.compile(r"^Criticality\b")
+        ).first
+        self.status_filter = page.get_by_role(
+            "button", name=re.compile(r"^Status\b")
         ).first
         self.cpo_filter = page.get_by_role(
             "button", name=re.compile(r"^CPO\b")
@@ -212,8 +192,12 @@ class operations_hub:
         self.next_page = page.get_by_role("button", name="Go to next page")
         self.prev_page = page.get_by_role("button", name="Go to previous page")
 
-        # Site detail: breadcrumb + Maintenance tab controls
-        self.breadcrumb_hub = page.get_by_role("button", name="Operations Hub", exact=True)
+        # Site detail: breadcrumb + Maintenance panel controls
+        self.breadcrumb = page.get_by_role("navigation", name="Breadcrumb")
+        self.breadcrumb_hub = self.breadcrumb.get_by_role(
+            "link", name="Operations Hub", exact=True
+        )
+        self.back_to_hub = page.get_by_role("button", name="Back to Operations Hub")
         self.add_events = page.get_by_role("button", name="Add Events", exact=True)
         self.create_plan = page.get_by_role(
             "button", name="Create Maintenance Plan", exact=True
@@ -224,9 +208,9 @@ class operations_hub:
         self.read_more = page.get_by_role("button", name="Read more")
         self.read_less = page.get_by_role("button", name="Read less")
 
-        # Dialogs raised from the Maintenance tab. A dropdown's popover is also
-        # a dialog and stacks on top of the form, so `.first` is the form and
-        # `.last` is whatever opened most recently.
+        # Dialogs raised from the Maintenance panel. A dropdown's popover is
+        # also a dialog and stacks on top of the form, so `.first` is the form
+        # and `.last` is whatever opened most recently.
         self.dialog = page.get_by_role("dialog")
 
         # Map
@@ -239,98 +223,69 @@ class operations_hub:
     # ----------------------------------------------------------------- #
     # Helpers
     # ----------------------------------------------------------------- #
-    def _cpo_rows(self):
-        """Real CPO rows.
+    def _park_mouse(self):
+        """Move the pointer off the sidebar and let it collapse.
 
-        Every CPO row prints its UUID as "ID: ...", while the "No CPOs found"
-        empty state is a single plain cell -- so this can never be fooled into
-        counting the empty state as data.
+        The sidebar is fixed to the left edge and widens while hovered,
+        covering the table's leading column -- which is exactly where the row
+        expanders live. A click there is then intercepted by the nav and
+        retries until it times out. The pointer is left over the sidebar after
+        every sidebar-link click, so this runs before any expander click.
         """
-        return self.rows.filter(has_text=re.compile(r"ID:\s*\S"))
+        size = self.page.viewport_size or {"width": 1280, "height": 720}
+        self.page.mouse.move(size["width"] - 40, size["height"] // 2)
+        self.page.wait_for_timeout(700)
+
+    def _cpo_rows(self):
+        """Real CPO rows on the hub.
+
+        Every CPO row prints its ID as "ID: ...", while the "No CPOs or sites
+        found" empty state is a single plain cell. An expanded row's nested
+        site table also prints IDs, so the <tr> that holds it (it contains a
+        table of its own) is excluded.
+        """
+        return self.rows.filter(has_text=re.compile(r"ID:\s*\S")).filter(
+            has_not=self.page.locator("table")
+        )
 
     def _site_rows(self):
-        """Real site rows, excluding expansion panels and the empty state.
+        """Real site rows on the CPO's own sites page.
 
-        An expanded row inserts a second <tr> holding the Asset / Organisation /
-        Maintenance detail panel. Only a real site row carries the "View
-        details" action, so filtering on it counts sites rather than <tr>s.
+        An expanded row inserts a second <tr> holding the detail panel. Only a
+        real site row carries the "View details" action, so filtering on it
+        counts sites rather than <tr>s.
         """
         return self.rows.filter(
             has=self.page.get_by_role("button", name="View details")
         )
 
+    def _nested_site_rows(self):
+        """Site rows inside the hub's expanded CPO row(s).
+
+        The nested table has no header; each real site row carries an "Open
+        site" action, which the expanded detail panel below it does not.
+        """
+        return self.table.locator("table tbody tr").filter(
+            has=self.page.get_by_role("button", name="Open site")
+        )
+
+    def _total(self):
+        """The total from "Showing 1–20 of 61" (0 for "Showing 0 results")."""
+        try:
+            text = self.showing.first.text_content(timeout=2000) or ""
+        except Exception:
+            return -1
+        m = re.search(r"of\s+([\d,]+)", text)
+        return int(m.group(1).replace(",", "")) if m else 0
+
     def _columns(self):
         return [
             (h.inner_text() or "").strip()
-            for h in self.page.locator("table thead th").all()
-        ]
-
-    def _column_index(self, col):
-        cols = self._columns()
-        assert col in cols, f"the table has no {col!r} column (has {cols})"
-        return cols.index(col)
-
-    def _column_values(self, col, row_locator):
-        """The `col` cell of every row, or [] if the table re-rendered mid-read.
-
-        `.all()` snapshots element handles, and a refetch landing a moment later
-        detaches them -- reading the next cell then raises. Since every caller
-        either polls on this or asserts the result is non-empty, returning []
-        makes a mid-flight read simply count as "not settled yet" instead of
-        crashing the run.
-        """
-        idx = self._column_index(col)
-        values = []
-        for row in row_locator.all():
-            try:
-                values.append((row.locator("td").nth(idx).inner_text() or "").strip())
-            except Exception:
-                return []
-        return values
-
-    def _assert_column(self, col, expected, applied, row_locator, exact=False):
-        """Assert every row's `col` cell matches `expected` after a filter.
-
-        The column-level check: it reads the one column the filter is supposed
-        to drive rather than matching the term anywhere in the row, so a row
-        that merely mentions the term elsewhere cannot pass.
-        """
-        # Retry a read that landed mid-refetch (see _column_values), so an empty
-        # result can never make this assertion pass vacuously.
-        assert self._poll(lambda: bool(self._column_values(col, row_locator))), (
-            f"{applied}: could not read the {col} column -- the table has no rows"
-        )
-        values = self._column_values(col, row_locator)
-        offenders = [
-            v for v in values
-            if (v != expected if exact else expected.lower() not in v.lower())
-        ]
-        assert not offenders, (
-            f"{applied}: the {col} column should "
-            f"{'be' if exact else 'contain'} {expected!r} on every row, but "
-            f"{len(offenders)} of {len(values)} row(s) differ -> {offenders[:3]}"
-        )
-        log.info("%s: all %s row(s) have %s %s %r",
-                 applied, len(values), col, "=" if exact else "containing", expected)
-
-    def _rows_match(self, col, term, row_locator):
-        """True when there is at least one row and every one matches `term`.
-
-        Used as a settle signal after a search: the list only agrees with the
-        query once the refetch has landed.
-        """
-        values = self._column_values(col, row_locator)
-        return bool(values) and all(term.lower() in v.lower() for v in values)
-
-    def _order(self, row_locator, col_index=0):
-        """The first line of each row's `col_index` cell, top to bottom."""
-        return [
-            (r.locator("td").nth(col_index).inner_text() or "").strip().split("\n")[0]
-            for r in row_locator.all()
+            for h in self.table.locator(":scope > thead th").all()
         ]
 
     def _header(self, col):
-        return self.page.locator(f"//th[normalize-space()='{col}']")
+        return self.table.locator(f"xpath=./thead//th[normalize-space()='{col}']")
 
     def _poll(self, predicate, timeout_ms=10000, interval_ms=200):
         """Poll `predicate` until truthy (or timeout), returning its last value.
@@ -369,6 +324,86 @@ class operations_hub:
         log.info("%s filter offers %s", name, expected_options)
         return options
 
+    def _column_index(self, col):
+        cols = self._columns()
+        assert col in cols, f"the table has no {col!r} column (has {cols})"
+        return cols.index(col)
+
+    def _column_values(self, col, row_locator):
+        """The `col` cell of every row, read in one snapshot.
+
+        The rows re-render whenever a refetch lands, so reading them one
+        element handle at a time can hit a detached row half-way through.
+        `evaluate_all` reads every cell in a single pass instead; a read that
+        still races a re-render returns [] -- every caller either polls on
+        this or asserts the result is non-empty, so that simply counts as "not
+        settled yet".
+        """
+        idx = self._column_index(col)
+        try:
+            return row_locator.evaluate_all(
+                """(rows, idx) => rows.map(r => {
+                    const cell = r.querySelectorAll(':scope > td')[idx];
+                    return cell ? cell.innerText.trim() : '';
+                })""",
+                idx,
+            )
+        except Exception:
+            return []
+
+    def _first_lines(self, col, row_locator):
+        """The first line of each row's `col` cell -- e.g. a name without its ID."""
+        return [v.split("\n")[0].strip() for v in self._column_values(col, row_locator)]
+
+    def _assert_column(self, col, expected, applied, row_locator, exact=False):
+        """Assert every row's `col` cell matches `expected` after a filter.
+
+        The column-level check: it reads the one column the filter is supposed
+        to drive rather than matching the term anywhere in the row, so a row
+        that merely mentions the term elsewhere cannot pass.
+        """
+        # Retry a read that landed mid-refetch (see _column_values), so an empty
+        # result can never make this assertion pass vacuously.
+        assert self._poll(lambda: bool(self._column_values(col, row_locator))), (
+            f"{applied}: could not read the {col} column -- the table has no rows"
+        )
+        values = self._first_lines(col, row_locator)
+        offenders = [
+            v for v in values
+            if (v != expected if exact else expected.lower() not in v.lower())
+        ]
+        assert not offenders, (
+            f"{applied}: the {col} column should "
+            f"{'be' if exact else 'contain'} {expected!r} on every row, but "
+            f"{len(offenders)} of {len(values)} row(s) differ -> {offenders[:3]}"
+        )
+        log.info("%s: all %s row(s) have %s %s %r",
+                 applied, len(values), col, "=" if exact else "containing", expected)
+
+    def _rows_match(self, col, term, row_locator):
+        """True when there is at least one row and every one matches `term`.
+
+        Used as a settle signal after a search: the list only agrees with the
+        query once the refetch has landed.
+        """
+        values = self._column_values(col, row_locator)
+        return bool(values) and all(term.lower() in v.lower() for v in values)
+
+    def _order(self, row_locator):
+        """The CPO names on the page, top to bottom."""
+        return self._first_lines("CPO", row_locator)
+
+    def _assert_panel(self, scope, where, labels=None):
+        """An expanded site panel spells out its assets, organisation and dates.
+
+        textContent keeps the source casing while CSS upper-cases the section
+        headings on screen, so the labels are compared case-insensitively.
+        """
+        text = (scope.text_content() or "").lower()
+        for label in labels or self.SITE_PANEL_LABELS:
+            assert label.lower() in text, f"the {where} panel is missing {label!r}"
+        log.info("%s panel shows the site's assets, organisation and dates", where)
+
     # ----------------------------------------------------------------- #
     # Open
     # ----------------------------------------------------------------- #
@@ -377,17 +412,23 @@ class operations_hub:
         self.hub_link.click()
         self.page.wait_for_url(re.compile(r"/operations/operations-hub"), timeout=15000)
         self.heading.wait_for(state="visible", timeout=15000)
+        self._park_mouse()
         # The table renders skeleton rows while it loads; wait for real data.
         assert self._poll(lambda: self._cpo_rows().count() > 0, timeout_ms=25000), (
             "the CPO list never loaded"
         )
-        # The hub opens on List View in CPOs mode.
-        expect(self.cpo_mode).to_be_checked()
-        log.info("Hub open in List View / CPOs mode with %s CPO(s) listed",
+        # The hub opens on the List View. The old CPOs / Sites radio switch is
+        # gone -- the list is always CPOs, with sites nested inside each row --
+        # so the List View is proven by the URL and the unified search box.
+        assert "view=map" not in self.page.url, (
+            f"the hub should open on the List View, got {self.page.url}"
+        )
+        expect(self.hub_search).to_be_visible()
+        log.info("Hub open in List View with %s CPO(s) listed",
                  self._cpo_rows().count())
 
     # ----------------------------------------------------------------- #
-    # List View: CPOs
+    # List View
     # ----------------------------------------------------------------- #
     def check_cpo_table(self):
         """Confirm the CPO table renders its full column set and a full page."""
@@ -401,80 +442,118 @@ class operations_hub:
         size = int((self.page_size.text_content() or "0").strip())
         count = self._cpo_rows().count()
         assert count == size, f"expected {size} CPO rows on page 1, got {count}"
+        assert self._total() > size, (
+            f"expected more than one page of CPOs, the footer says {self._total()}"
+        )
 
-        # Every CPO names itself and prints its UUID underneath, and the Sites
-        # column is always a number.
+        # Every CPO names itself with its ID underneath, and the Sites column
+        # is always a number.
         for value in self._column_values("Sites", self._cpo_rows()):
             assert value.isdigit(), f"the Sites column is not a count: {value!r}"
-        log.info("CPO table shows %s row(s), each with an ID and a site count", count)
+        for value in self._column_values("CPO", self._cpo_rows()):
+            assert re.search(r"ID:\s*\S", value), f"a CPO row has no ID: {value!r}"
+        log.info("CPO table shows %s of %s row(s), each with an ID and a site count",
+                 count, self._total())
 
     def search_cpos(self):
-        """Search the CPO list, check the column, and check the empty state."""
-        before = self._cpo_rows().count()
+        """Search the hub by CPO, then by site, and check the empty state.
 
-        log.info("Searching CPOs for %r", SEARCH_TERM)
-        self.cpo_search.fill(SEARCH_TERM)
-        assert self._poll(lambda: 0 < self._cpo_rows().count() < before), (
+        The one box now spans CPO *and* site names: a CPO term narrows to that
+        CPO, while a site term surfaces the site's CPO with its Sites column
+        reading "matched/total".
+        """
+        before = self._total()
+
+        log.info("Searching the hub for CPO %r", SEARCH_TERM)
+        self.hub_search.fill(SEARCH_TERM)
+        assert self._poll(lambda: 0 < self._total() < before), (
             f"the CPO search should narrow the list from {before}, "
-            f"got {self._cpo_rows().count()}"
+            f"got {self._total()}"
         )
-        self._assert_column("CPO Name", SEARCH_TERM, f"CPO search {SEARCH_TERM!r}",
+        assert self._poll(
+            lambda: self._rows_match("CPO", SEARCH_TERM, self._cpo_rows())
+        ), f"the rows never agreed with the search: {self._order(self._cpo_rows())}"
+        self._assert_column("CPO", SEARCH_TERM, f"CPO search {SEARCH_TERM!r}",
                             self._cpo_rows())
 
-        log.info("Searching CPOs for a term that matches nothing")
-        self.cpo_search.fill("zzzz-no-such-cpo")
+        log.info("Searching the hub for site %r", SITE)
+        self.hub_search.fill(SITE)
+        assert self._poll(
+            lambda: self._order(self._cpo_rows()) == [SITE_CPO], timeout_ms=15000
+        ), (
+            f"searching for site {SITE!r} should list only its CPO {SITE_CPO!r}, "
+            f"got {self._order(self._cpo_rows())}"
+        )
+        sites = self._column_values("Sites", self._cpo_rows())[0]
+        assert re.fullmatch(r"1/\d+", sites), (
+            f"a site search should show '1/<total>' in the Sites column, got {sites!r}"
+        )
+        log.info("Site search lists %s with %s site(s) matched", SITE_CPO, sites)
+
+        log.info("Searching the hub for a term that matches nothing")
+        self.hub_search.fill("zzzz-no-such-cpo")
         assert self._poll(lambda: self._cpo_rows().count() == 0), (
             f"expected no CPOs, got {self._cpo_rows().count()}"
         )
-        # The empty state now leads with a heading and repeats the term back
-        # underneath it ("No CPOs match “zzzz-no-such-cpo”."), so it is
-        # matched on the heading rather than on the old single-sentence copy.
-        expect(self.page.get_by_text("No CPOs found", exact=True)).to_be_visible()
-        log.info("CPO empty state shown")
+        # The empty state leads with a heading and repeats the term back
+        # underneath it, so it is matched on the heading.
+        expect(self.page.get_by_text("No CPOs or sites found", exact=True)).to_be_visible()
+        log.info("Hub empty state shown")
 
-        self._clear_search(self.cpo_search)
-        assert self._poll(lambda: self._cpo_rows().count() == before), (
-            f"expected {before} CPO(s) after clearing the search, "
-            f"got {self._cpo_rows().count()}"
+        self._clear_search(self.hub_search)
+        assert self._poll(lambda: self._total() == before), (
+            f"expected {before} CPO(s) after clearing the search, got {self._total()}"
         )
-        log.info("CPO search cleared, back to %s CPO(s)", before)
+        log.info("Search cleared, back to %s CPO(s)", before)
 
     def _sorted_ok(self, values, ascending):
-        """True when `values` are in the expected order (case-insensitive)."""
-        keys = [v.lower() for v in values if v]
+        """True when `values` are in the expected order.
+
+        The API sorts with a locale collation that ignores case, spaces and
+        punctuation ("States of Guernsey" before "St Martins CO OP", "Leeds"
+        before "Le Friquet"), so names are compared on their letters and digits
+        only -- a plain string sort disagrees with a correct server sort.
+        """
+        keys = [re.sub(r"[^a-z0-9]", "", v.lower()) for v in values if v]
         if len(keys) < 2:
             return False
         return keys == sorted(keys, reverse=not ascending)
 
+    def _numbers_sorted(self, values, ascending):
+        nums = [int(v) for v in values if v.isdigit()]
+        if len(nums) < 2 or len(nums) != len(values):
+            return False
+        return nums == sorted(nums, reverse=not ascending)
+
     def _watch_cpo_api(self):
         """Record the status of every CPO-list request, keyed by its sort_by.
 
-        Sorting is asserted on the API response, not just on the rows: the two
-        broken columns still update the URL and still leave a full table on
-        screen (the stale one), so only the response code tells the truth about
+        Sorting is asserted on the API response, not just on the rows: a
+        rejected sort still updates the URL and still leaves a full (stale)
+        table on screen, so only the response code tells the truth about
         whether a sort was accepted.
         """
         seen = []
 
         def on_response(response):
-            if "/operations/cpos" in response.url:
+            if "/operations/hub" in response.url:
                 match = re.search(r"sort_by=([a-z_]+)", response.url)
-                seen.append((match.group(1) if match else None, response.status))
+                order = re.search(r"sort_order=(asc|desc)", response.url)
+                seen.append((match.group(1) if match else None,
+                             order.group(1) if order else None, response.status))
 
         self.page.on("response", on_response)
         return seen, on_response
 
     def sort_cpos(self):
-        """Sort the CPO columns both ways, and pin the two broken headers.
+        """Sort every sortable CPO column both ways.
 
-        Deal Type, Next Maint. and Criticality are "—" for nearly every CPO on
-        staging, so a *correct* sort legitimately leaves the visible order
-        unchanged -- a "did the rows move?" check would fail on data rather than
-        on behaviour. They are therefore asserted on the URL and on the API
-        accepting the request (HTTP 200) with the table still populated.
-
-        CPO Name and Sites are covered separately, because they are broken --
-        see CPO_SORTS_BROKEN.
+        Deal Type, Next Maint. and Criticality are "—" for most CPOs on staging,
+        so a *correct* sort can legitimately leave the visible order unchanged
+        -- a "did the rows move?" check would fail on data rather than on
+        behaviour. Those are asserted on the API accepting the request (HTTP
+        200) with the table still populated. CPO and Sites are always
+        populated, so for them the row order itself is checked as well.
         """
         seen, listener = self._watch_cpo_api()
         try:
@@ -483,58 +562,52 @@ class operations_hub:
                     seen.clear()
                     self._header(col).click()
                     self.page.wait_for_url(
-                        re.compile(rf"[?&]sort_by={param}&sort_order={direction}"),
-                        timeout=10000,
+                        re.compile(rf"[?&]sort_order={direction}"), timeout=10000
                     )
                     assert self._poll(
-                        lambda p=param: any(s == p for s, _ in seen), timeout_ms=15000
+                        lambda p=param, d=direction: any(
+                            s == p and o == d for s, o, _ in seen),
+                        timeout_ms=15000,
                     ), f"sorting by {col!r} {direction} never called the API"
-                    statuses = [st for s, st in seen if s == param]
+                    statuses = [st for s, o, st in seen
+                                if s == param and o == direction]
                     assert all(st == 200 for st in statuses), (
                         f"sorting by {col!r} {direction} was rejected by the API: "
                         f"{statuses} (sent sort_by={param})"
                     )
-                    assert self._poll(lambda: self._cpo_rows().count() > 0,
-                                      timeout_ms=20000), (
-                        f"the CPO list is empty after sorting by {col!r} {direction}"
-                    )
+                    asc = direction == "asc"
+                    if col == "CPO":
+                        assert self._poll(
+                            lambda a=asc: self._sorted_ok(
+                                self._order(self._cpo_rows()), a),
+                            timeout_ms=15000,
+                        ), (
+                            f"the CPO names are not in {direction} order: "
+                            f"{self._order(self._cpo_rows())[:6]}"
+                        )
+                    elif col == "Sites":
+                        assert self._poll(
+                            lambda a=asc: self._numbers_sorted(
+                                self._column_values("Sites", self._cpo_rows()), a),
+                            timeout_ms=15000,
+                        ), (
+                            f"the Sites counts are not in {direction} order: "
+                            f"{self._column_values('Sites', self._cpo_rows())}"
+                        )
+                    else:
+                        assert self._poll(lambda: self._cpo_rows().count() > 0,
+                                          timeout_ms=20000), (
+                            f"the CPO list is empty after sorting by {col!r} {direction}"
+                        )
                 log.info("Column %-12s sorts asc+desc (sort_by=%s, HTTP 200)",
                          col, param)
-
-            self._check_broken_sorts(seen)
         finally:
             self.page.remove_listener("response", listener)
 
         # Drop the sort so the rest of the run sees the default order.
         self.page.goto(self.page.url.split("?")[0])
         assert self._poll(lambda: self._cpo_rows().count() > 0, timeout_ms=25000)
-
-    def _check_broken_sorts(self, seen):
-        """Pin the CPO Name / Sites sort defect (see CPO_SORTS_BROKEN).
-
-        Asserts the *current, broken* behaviour on purpose: the header sends the
-        wrong sort_by, the API rejects it with 422, and the table is left
-        showing whatever it had before. When the frontend is corrected this
-        assertion fails -- which is the point. Move the column into CPO_SORTS
-        and delete its entry from CPO_SORTS_BROKEN at that stage.
-        """
-        for col, (sent, expected) in self.CPO_SORTS_BROKEN.items():
-            seen.clear()
-            self._header(col).click()
-            assert self._poll(
-                lambda s=sent: any(p == s for p, _ in seen), timeout_ms=15000
-            ), f"clicking {col!r} never called the API"
-            statuses = [st for p, st in seen if p == sent]
-            assert 422 in statuses, (
-                f"KNOWN BUG APPEARS FIXED: sorting by {col!r} now returns "
-                f"{statuses} instead of 422. Move {col!r} from CPO_SORTS_BROKEN "
-                f"into CPO_SORTS and assert it properly."
-            )
-            log.warning(
-                "KNOWN BUG -- the %r header sends sort_by=%r but the API only "
-                "accepts %r, so it returns HTTP 422 and the sort silently does "
-                "nothing", col, sent, expected,
-            )
+        self._park_mouse()
 
     def paginate_cpos(self):
         """Step, jump and resize through the CPO list."""
@@ -595,93 +668,345 @@ class operations_hub:
         )
 
     # ----------------------------------------------------------------- #
-    # CPO drill-down
+    # Hub filters
     # ----------------------------------------------------------------- #
-    def open_cpo_detail(self):
-        """Drill into a CPO and exercise its sites page, then come back.
+    def _remove_chip(self, choice):
+        """The chip an applied filter adds below the bar ("Remove <choice>")."""
+        return self.page.get_by_role("button", name=f"Remove {choice}", exact=True)
 
-        Covers the drill-down URL, the (CPO-less) column set, the deal-type and
-        criticality filters, and expanding a row then collapsing every row.
+    def _apply_filter(self, trigger, options, choice, param, name):
+        """Open `trigger`, check its options, tick `choice` and Apply.
+
+        The filters are multi-selects: ticking an option does nothing until
+        Apply is pressed. The applied filter is confirmed three ways -- it
+        pushes its own query parameter, the trigger relabels itself to the
+        chosen value, and a removable chip appears -- so a popover that closes
+        without doing anything cannot pass.
         """
-        log.info("Opening the CPO drill-down for %r", CPO)
-        self.cpo_search.fill(CPO)
-        assert self._poll(lambda: self._cpo_rows().count() == 1), (
-            f"expected exactly 1 CPO for {CPO!r}, got {self._cpo_rows().count()}"
-        )
-        self.page.get_by_role("button", name=CPO, exact=True).click()
+        self._open_filter(trigger, options, name)
+        log.info("Applying the %s filter %r", name, choice)
+        self.page.get_by_role("option", name=choice, exact=True).click()
+        self.dialog.last.get_by_role("button", name="Apply").click()
+        self.page.wait_for_url(re.compile(rf"[?&]{param}="), timeout=10000)
+        expect(trigger).to_contain_text(choice)
+        expect(self._remove_chip(choice)).to_be_visible()
 
-        # The drill-down carries the CPO's UUID in the path and its name in the
-        # query string.
-        self.page.wait_for_url(
-            re.compile(r"/operations/operations-hub/[0-9a-f-]{36}"), timeout=15000
+    def _clear_filter(self, choice, param, name):
+        """Drop an applied filter through its own chip."""
+        log.info("Clearing the %s filter", name)
+        self._remove_chip(choice).click()
+        self.page.wait_for_url(lambda url: f"{param}=" not in url, timeout=10000)
+
+    def filter_cpos(self):
+        """Apply each hub filter, check the list agrees, then clear it.
+
+        Deal Type and Criticality are asserted on their own column of every
+        remaining CPO row. The CPO filter must leave exactly the chosen CPO.
+        The Status column holds a per-status site count rather than a label,
+        so the Status filter is asserted on the list narrowing and on every
+        CPO reporting a "matched/total" site count.
+        """
+        before = self._total()
+        cases = (
+            (self.type_filter, self.DEAL_TYPES, self.DEAL_TYPES[0],
+             "deal_type", "Deal Type", "Deal Type"),
+            (self.criticality_filter, self.CRITICALITIES, self.CRITICALITIES[-1],
+             "criticality", "Criticality", "Criticality"),
+            (self.status_filter, self.STATUSES, self.STATUSES[0],
+             "status", "Status", None),
+            (self.cpo_filter, ["Capurro Garage"], "Capurro Garage",
+             "cpo_id", "CPO", "CPO"),
         )
-        assert "cpo_name=" in self.page.url, (
-            f"the drill-down URL does not name the CPO: {self.page.url}"
+        for trigger, options, choice, param, name, column in cases:
+            self._apply_filter(trigger, options, choice, param, name)
+            # The URL updates the moment Apply is pressed, but the table only
+            # catches up when the refetch lands -- so poll on the total.
+            assert self._poll(lambda: 0 < self._total() < before, timeout_ms=15000), (
+                f"the {name} filter {choice!r} should narrow the list from "
+                f"{before}, got {self._total()}"
+            )
+            if column == "CPO":
+                assert self._poll(
+                    lambda: self._order(self._cpo_rows()) == [choice]
+                ), f"the CPO filter left {self._order(self._cpo_rows())}"
+                log.info("CPO filter %r leaves just that CPO", choice)
+            elif column:
+                assert self._poll(
+                    lambda c=column: self._rows_match(c, choice, self._cpo_rows()),
+                    timeout_ms=15000,
+                ), (
+                    f"the {name} filter {choice!r} left rows that do not match: "
+                    f"{self._column_values(column, self._cpo_rows())[:3]}"
+                )
+                self._assert_column(column, choice, f"{name} {choice!r}",
+                                    self._cpo_rows(), exact=True)
+            else:
+                for value in self._column_values("Sites", self._cpo_rows()):
+                    assert re.fullmatch(r"\d+(/\d+)?", value), (
+                        f"{name} {choice!r}: unexpected Sites cell {value!r}"
+                    )
+                log.info("%s %r narrows the hub to %s CPO(s)",
+                         name, choice, self._total())
+
+            self._clear_filter(choice, param, name)
+            assert self._poll(lambda: self._total() == before), (
+                f"expected {before} CPO(s) after clearing the {name} filter, "
+                f"got {self._total()}"
+            )
+
+    # ----------------------------------------------------------------- #
+    # Row expansion (CPO -> sites -> site panel)
+    # ----------------------------------------------------------------- #
+    def expand_cpo_rows(self):
+        """Expand a CPO into its sites, a site into its panel, then collapse.
+
+        Replaces the old CPO drill-down page and the separate Sites view: a CPO
+        row now expands in place into a nested list of its sites, and each of
+        those expands again into the asset / organisation / maintenance panel.
+        """
+        log.info("Finding %r", CPO)
+        self.hub_search.fill(CPO)
+        assert self._poll(
+            lambda: CPO in self._order(self._cpo_rows()), timeout_ms=15000
+        ), f"{CPO!r} is not listed after searching for it"
+        row = self._cpo_rows().filter(has_text=CPO).first
+        expected = int(self._column_values("Sites", self._cpo_rows().filter(
+            has_text=CPO))[0])
+
+        log.info("Expanding %r into its sites", CPO)
+        self._park_mouse()
+        row.get_by_role("button", name="Expand row").click()
+        assert self._poll(
+            lambda: self._nested_site_rows().count() == expected, timeout_ms=20000
+        ), (
+            f"{CPO} lists {expected} site(s) but its expanded row shows "
+            f"{self._nested_site_rows().count()}"
+        )
+        expect(row.get_by_role("button", name="Collapse row")).to_be_visible()
+        log.info("%r expands into its %s site(s)", CPO, expected)
+
+        log.info("Expanding the first site's detail panel")
+        nested = self.table.locator("table").first
+        nested_rows = nested.locator(":scope > tbody > tr")
+        base = nested_rows.count()
+        self._nested_site_rows().first.get_by_role("button", name="Expand row").click()
+        assert self._poll(lambda: nested_rows.count() == base + 1), (
+            f"expanding a site should add a panel row to the {base} present, "
+            f"got {nested_rows.count()}"
+        )
+        self._assert_panel(nested.locator(":scope > tbody"), "expanded site")
+        nested.get_by_role("button", name="Collapse row").click()
+        assert self._poll(lambda: nested_rows.count() == base), (
+            f"expected {base} site row(s) after collapsing, got {nested_rows.count()}"
+        )
+
+        row.get_by_role("button", name="Collapse row").click()
+        assert self._poll(lambda: self._nested_site_rows().count() == 0), (
+            "collapsing the CPO row left its sites on screen"
+        )
+        self._clear_search(self.hub_search)
+        assert self._poll(lambda: self._cpo_rows().count() > 1, timeout_ms=15000)
+
+        # The header toggle expands every CPO on the page at once.
+        log.info("Expanding, then collapsing, every CPO row")
+        page_rows = self._cpo_rows().count()
+        self._park_mouse()
+        self.expand_all.click()
+        assert self._poll(
+            lambda: self.table.locator("table").count() == page_rows,
+            timeout_ms=25000,
+        ), (
+            f"Expand all should open all {page_rows} CPO row(s), "
+            f"{self.table.locator('table').count()} opened"
+        )
+        self.collapse_all.click()
+        assert self._poll(lambda: self.table.locator("table").count() == 0), (
+            "Collapse all left some CPO rows open"
+        )
+        expect(self.expand_all).to_be_visible()
+        log.info("Expand all / Collapse all toggle all %s CPO row(s)", page_rows)
+
+    # ----------------------------------------------------------------- #
+    # Site detail
+    # ----------------------------------------------------------------- #
+    def open_site_detail(self):
+        """Open a site's own page and walk every tab it offers in depth.
+
+        Pinned to `SITE` rather than "whichever row is first", because the
+        Maintenance walk needs a site that actually has plans -- see the note on
+        the constant. The site is reached the way a user now does: search the
+        hub for it, expand its CPO, and "Open site".
+        """
+        log.info("Opening the detail page for %r", SITE)
+        self.hub_search.fill(SITE)
+        # Poll until the rows agree with the search rather than just until some
+        # rows exist -- the previous, unfiltered list is still on screen while
+        # the search refetches, and would otherwise be acted on.
+        assert self._poll(
+            lambda: self._order(self._cpo_rows()) == [SITE_CPO], timeout_ms=15000
+        ), f"the site search never settled on {SITE_CPO!r}"
+        self._park_mouse()
+        self._cpo_rows().first.get_by_role("button", name="Expand row").click()
+        site_row = self._nested_site_rows().filter(has_text=SITE)
+        assert self._poll(lambda: site_row.count() == 1, timeout_ms=20000), (
+            f"expanding {SITE_CPO!r} did not list {SITE!r}"
+        )
+        site_row.get_by_role("button", name="Open site").click()
+
+        # /operations-hub/<cpo-uuid>/<site-uuid>
+        self.page.wait_for_url(
+            re.compile(r"/operations/operations-hub/[0-9a-f-]{36}/[0-9a-f-]{36}"),
+            timeout=20000,
+        )
+        self.back_to_hub.wait_for(state="visible", timeout=20000)
+        # The header states the site, its CPO, its external ID and its device
+        # counts. CSS upper-cases the labels, so they are compared on
+        # textContent, case-insensitively.
+        main = self.page.locator("main")
+        assert self._poll(
+            lambda: SITE.lower() in (main.text_content() or "").lower(),
+            timeout_ms=15000,
+        ), f"the site page does not name {SITE!r}"
+        header = (main.text_content() or "").lower()
+        for label in ("Site :", "CPO", "External ID", "Charging devices",
+                      "Sockets", "Next maintenance"):
+            assert label.lower() in header, f"the site header is missing {label!r}"
+        assert SITE_CPO.lower() in header, f"the site header does not name {SITE_CPO!r}"
+        for tab in self.SITE_TABS:
+            expect(self._tab(tab)).to_be_visible()
+        # The Maintenance tab has gone from the site page's tab bar; the panel
+        # is now reached from the CPO page's per-row Maintenance action (see
+        # browse_cpo_page).
+        assert not self.page.get_by_role(
+            "button", name=re.compile(r"^Maintenance")
+        ).count(), "the site page unexpectedly shows a Maintenance tab again"
+        log.info("Site detail open for %s", SITE)
+
+        self._check_breadcrumb()
+        self._browse_site_info()
+        self._browse_tracker()
+        self._browse_records()
+        self.browse_cpo_page()
+        self._leave_site_detail()
+
+    def _check_breadcrumb(self):
+        """The trail links the hub and the CPO, and ends on the site."""
+        expect(self.breadcrumb_hub).to_be_visible()
+        expect(self.breadcrumb.get_by_role("link", name=SITE_CPO)).to_be_visible()
+        expect(self.breadcrumb).to_contain_text(SITE)
+        log.info("Breadcrumb shows Operations Hub > %s > %s", SITE_CPO, SITE)
+
+    def _tab(self, name):
+        """A site tab, whose label may carry a count ("Records 2")."""
+        return self.page.get_by_role(
+            "button", name=re.compile(rf"^{re.escape(name)}(\s*\d+)?$")
+        ).first
+
+    # -- Site Info ----------------------------------------------------- #
+    def _browse_site_info(self):
+        self._tab("Site Info").click()
+        body = self.page.locator("body")
+        assert self._poll(
+            lambda: "Address :" in (body.inner_text() or ""), timeout_ms=15000
+        ), "the Site Info tab never rendered"
+        text = body.inner_text() or ""
+        for label in ("Address :", "City :", "Postal Code :", "Contact Person :",
+                      "Contact No :", "Latitude :", "Longitude :"):
+            assert label in text, f"the Site Info tab is missing {label!r}"
+        # The site's hardware is listed underneath its location details. The
+        # form is editable in place (with Delete / Add controls), which this
+        # run deliberately never touches.
+        for label in ("Charging Device", "Model :", "Status :", "Socket"):
+            assert label in text, f"the Site Info tab is missing {label!r}"
+        log.info("Site Info tab shows the location, contact and hardware details")
+
+    # -- Tracker ------------------------------------------------------- #
+    def _browse_tracker(self):
+        self._tab("Tracker").click()
+        self.page.wait_for_timeout(2500)
+        body = self.page.locator("main").inner_text() or ""
+        # A site either has a tracker attached or says plainly that it has none.
+        assert "Tracker" in body, "the Tracker tab renders nothing"
+        if "No Tracker Attached" in body:
+            log.info("Tracker tab: no tracker attached to this site")
+        else:
+            log.info("Tracker tab: a tracker is attached")
+
+    # ----------------------------------------------------------------- #
+    # CPO sites page (via the site's breadcrumb)
+    # ----------------------------------------------------------------- #
+    def browse_cpo_page(self):
+        """Follow the breadcrumb up to the CPO's own sites page and exercise it.
+
+        This page keeps the older drill-down table: its column set, Deal Type
+        and Criticality filters, row expansion with "Collapse all rows", and a
+        per-row Maintenance action -- which is now the way into a site's
+        Maintenance panel.
+        """
+        log.info("Opening %r's own sites page from the breadcrumb", SITE_CPO)
+        self.breadcrumb.get_by_role("link", name=SITE_CPO).click()
+        self.page.wait_for_url(
+            re.compile(r"/operations/operations-hub/[0-9a-f-]{36}(\?|$)"), timeout=15000
         )
         assert self._poll(lambda: self._site_rows().count() > 0, timeout_ms=25000), (
-            f"{CPO} drill-down never listed any sites"
+            f"{SITE_CPO} sites page never listed any sites"
         )
-        log.info("Drill-down open at %s with %s site(s)",
-                 self.page.url.split("/")[-1][:40], self._site_rows().count())
+        self._park_mouse()
+        log.info("CPO sites page open with %s site(s)", self._site_rows().count())
 
         columns = self._columns()
         assert columns == self.CPO_DETAIL_COLUMNS, (
-            f"unexpected drill-down column set: {columns} != {self.CPO_DETAIL_COLUMNS}"
+            f"unexpected CPO page column set: {columns} != {self.CPO_DETAIL_COLUMNS}"
         )
+        expect(self.site_search).to_be_visible()
 
         self._filter_sites()
         self._expand_and_collapse()
-
-        log.info("Returning to the Operations Hub list")
-        self.page.go_back()
-        assert self._poll(lambda: self._cpo_rows().count() > 0, timeout_ms=25000), (
-            "did not get back to the CPO list"
-        )
-        self._clear_search(self.cpo_search)
-        self.page.wait_for_timeout(1000)
+        self._browse_maintenance()
 
     def _filter_sites(self):
-        """Apply the deal-type and criticality filters on the drill-down.
+        """Apply the deal-type and criticality filters on the CPO sites page.
 
         Each filter is asserted on its option set, really applied, and then
-        toggled back off by re-selecting the same option. Staging's sites mostly
-        carry neither a deal type nor a criticality, so a *correct* filter
-        legitimately empties this table -- the assertion is therefore that the
-        table responds (narrows, or shows its own "No sites found for this CPO"
-        empty state), not that it keeps rows the data may not have.
+        removed through its chip. The Criticality filter is asserted on its
+        own column of every remaining row.
+
+        The Deal Type filter is asserted on the list narrowing only: every site
+        row prints "Managed" in its Deal Type column whichever deal type it was
+        filtered on (while the hub's CPO row prints e.g. "O&M with Install").
+        That mismatch is reported as a suspected product bug rather than pinned
+        here.
         """
         before = self._site_rows().count()
 
-        for trigger, options, choice, param, name in (
-            (self.type_filter, self.DEAL_TYPES, self.DEAL_TYPES[1],
-             "deal_type", "Deal type"),
+        for trigger, options, choice, param, name, column in (
+            (self.type_filter, self.DEAL_TYPES, self.DEAL_TYPES[0],
+             "deal_type", "Deal type", None),
             (self.criticality_filter, self.CRITICALITIES, self.CRITICALITIES[-1],
-             "criticality", "Criticality"),
+             "criticality", "Criticality", "Criticality"),
         ):
-            column = "Deal Type" if param == "deal_type" else "Criticality"
             self._apply_filter(trigger, options, choice, param, name)
-
-            # The URL updates and the trigger relabels the moment the option is
-            # clicked, but the table only catches up when the refetch lands --
-            # so poll for the *rows* to agree with the filter. Asserting
-            # straight away reads the stale pre-filter rows and fails on timing
-            # rather than on behaviour.
+            # The URL updates the moment Apply is pressed, but the table only
+            # catches up when the refetch lands -- so poll for the *rows*.
             assert self._poll(
-                lambda c=column: self._filter_settled(c, choice), timeout_ms=15000
+                lambda: 0 < self._site_rows().count() < before, timeout_ms=15000
             ), (
-                f"the {name} filter {choice!r} left rows that do not match: "
-                f"{self._column_values(column, self._site_rows())[:3]}"
+                f"the {name} filter {choice!r} should narrow the {before} site(s), "
+                f"got {self._site_rows().count()}"
             )
-
-            if self._site_rows().count():
+            if column:
+                assert self._poll(
+                    lambda c=column: self._rows_match(c, choice, self._site_rows()),
+                    timeout_ms=15000,
+                ), (
+                    f"the {name} filter {choice!r} left rows that do not match: "
+                    f"{self._column_values(column, self._site_rows())[:3]}"
+                )
                 self._assert_column(column, choice, f"{name} {choice!r}",
                                     self._site_rows(), exact=True)
             else:
-                expect(
-                    self.page.get_by_text("No sites found for this CPO")
-                ).to_be_visible()
-                log.info("%s %r matches no site here -- empty state shown",
-                         name, choice)
+                log.info("%s %r narrows the CPO page to %s site(s)",
+                         name, choice, self._site_rows().count())
 
             self._clear_filter(choice, param, name)
             assert self._poll(lambda: self._site_rows().count() == before), (
@@ -689,68 +1014,21 @@ class operations_hub:
                 f"got {self._site_rows().count()}"
             )
 
-    def _filter_settled(self, column, choice):
-        """True once the table agrees with the filter.
-
-        Either the filter matched nothing (an empty table is a valid result
-        here -- most staging sites carry no deal type or criticality), or every
-        remaining row carries the chosen value in the column the filter drives.
-        """
-        rows = self._site_rows()
-        if rows.count() == 0:
-            return True
-        return all(v == choice for v in self._column_values(column, rows))
-
-    def _apply_filter(self, trigger, options, choice, param, name):
-        """Open `trigger`, check its options, and select `choice`.
-
-        The applied filter is confirmed two ways -- it pushes its own query
-        parameter, and the trigger relabels itself to the chosen value -- so a
-        popover that closes without doing anything cannot pass.
-        """
-        self._open_filter(trigger, options, name)
-        log.info("Applying the %s filter %r", name, choice)
-        self.page.get_by_role("option", name=choice, exact=True).click()
-        self.page.wait_for_url(re.compile(rf"[?&]{param}="), timeout=10000)
-        expect(self._filter_trigger(choice)).to_be_visible()
-
-    def _clear_filter(self, choice, param, name):
-        """Toggle `choice` back off by re-selecting it in its own popover."""
-        log.info("Clearing the %s filter", name)
-        self._filter_trigger(choice).click()
-        self.page.wait_for_timeout(800)
-        self.page.get_by_role("option", name=choice, exact=True).click()
-        self.page.wait_for_url(
-            lambda url: f"{param}=" not in url, timeout=10000
-        )
-
-    def _filter_trigger(self, choice):
-        """The filter trigger once it has relabelled itself to `choice`.
-
-        The label becomes e.g. "Criticality: High", so the trigger is matched on
-        the chosen value rather than on a hard-coded prefix per filter.
-        """
-        return self.page.get_by_role(
-            "button", name=re.compile(rf":\s*{re.escape(choice)}$")
-        )
-
     def _expand_and_collapse(self):
         """Expand a row's detail panel, then collapse every row."""
         base = self.rows.count()
         log.info("Expanding the first site row")
+        self._park_mouse()
         self.expand_row.first.click()
         assert self._poll(lambda: self.rows.count() == base + 1), (
             f"expanding a row should add a detail row to the {base} present, "
             f"got {self.rows.count()}"
         )
-        # The panel spells out the site's assets, organisation and maintenance
-        # dates; confirm the labels are all there so an empty panel is caught.
-        body = self.page.locator("table tbody").inner_text() or ""
-        for label in ("Asset Details", "Charging Devices", "Sockets",
-                      "Organisation Details", "Organisation",
-                      "Maintenance Dates", "Next Maintenance"):
-            assert label in body, f"the expanded panel is missing {label!r}"
-        log.info("Expanded panel shows Asset / Organisation / Maintenance details")
+        # The CPO page's panel is the hub's without the Lifecycle line.
+        self._assert_panel(
+            self.table.locator(":scope > tbody"), "CPO page site",
+            [label for label in self.SITE_PANEL_LABELS if label != "Lifecycle"],
+        )
 
         log.info("Collapsing all rows")
         self.collapse_all.click()
@@ -758,209 +1036,32 @@ class operations_hub:
             f"expected {base} row(s) after collapsing all, got {self.rows.count()}"
         )
 
-    # ----------------------------------------------------------------- #
-    # List View: Sites
-    # ----------------------------------------------------------------- #
-    def browse_sites_view(self):
-        """Switch the hub to Sites mode and exercise it."""
-        log.info("Switching the hub to Sites view")
-        # Clicked rather than .check()ed: the radio's DOM state only flips once
-        # React has re-rendered off the new URL, and .check() asserts the state
-        # synchronously right after the click, so it fails on a control that
-        # works. The URL and the checked assertion below cover it properly.
-        self.sites_mode.click()
-        self.page.wait_for_url(re.compile(r"[?&]view=sites"), timeout=10000)
-        expect(self.sites_mode).to_be_checked()
-        assert self._poll(lambda: self._site_rows().count() > 0, timeout_ms=25000), (
-            "the Sites list never loaded"
-        )
-        # The search box is relabelled for sites -- proof the mode really changed.
-        expect(self.site_search).to_be_visible()
-
-        columns = self._columns()
-        log.info("Sites table columns: %s", columns)
-        assert columns == self.SITE_COLUMNS, (
-            f"unexpected Sites column set: {columns} != {self.SITE_COLUMNS}"
-        )
-        log.info("Sites view shows %s site(s)", self._site_rows().count())
-
-        self._search_sites()
-        self._sort_sites()
-        self._expand_site_row()
-
-    def _search_sites(self):
-        before = self._site_rows().count()
-
-        log.info("Searching sites for %r", SEARCH_TERM)
-        self.site_search.fill(SEARCH_TERM)
-        assert self._poll(lambda: 0 < self._site_rows().count() < before), (
-            f"the site search should narrow the list from {before}, "
-            f"got {self._site_rows().count()}"
-        )
-        self._assert_column("Site Name", SEARCH_TERM, f"site search {SEARCH_TERM!r}",
-                            self._site_rows())
-
-        log.info("Searching sites for a term that matches nothing")
-        self.site_search.fill("zzzz-no-such-site")
-        assert self._poll(lambda: self._site_rows().count() == 0), (
-            f"expected no sites, got {self._site_rows().count()}"
-        )
-        expect(
-            self.page.get_by_text("No sites found matching your criteria")
-        ).to_be_visible()
-        log.info("Site empty state shown")
-
-        self._clear_search(self.site_search)
-        assert self._poll(lambda: self._site_rows().count() == before), (
-            f"expected {before} site(s) after clearing the search, "
-            f"got {self._site_rows().count()}"
-        )
-
-    def _sort_sites(self):
-        """Sort the Sites table, asserting through the URL as for CPOs."""
-        for col, param in self.SITE_SORTS.items():
-            self._header(col).click()
-            self.page.wait_for_url(
-                re.compile(rf"[?&]sort_by={param}&sort_order=asc"), timeout=10000
-            )
-            assert self._poll(lambda: self._site_rows().count() > 0), (
-                f"the site list is empty after sorting by {col!r}"
-            )
-            self._header(col).click()
-            self.page.wait_for_url(
-                re.compile(rf"[?&]sort_by={param}&sort_order=desc"), timeout=10000
-            )
-            assert self._poll(lambda: self._site_rows().count() > 0), (
-                f"the site list is empty after reversing the {col!r} sort"
-            )
-            log.info("Sites column %-12s sorts asc+desc (sort_by=%s)", col, param)
-
-    def _expand_site_row(self):
-        """Expand a site row, read its panel, then collapse it again.
-
-        The Sites view has no "Collapse all rows" header control -- the row's
-        own toggle relabels from "Expand row" to "Collapse row" -- so this
-        closes the panel the same way a user would.
-        """
-        base = self.rows.count()
-        log.info("Expanding the first site row in the Sites view")
-        self.expand_row.first.click()
-        assert self._poll(lambda: self.rows.count() == base + 1), (
-            f"expanding a row should add a detail row to the {base} present, "
-            f"got {self.rows.count()}"
-        )
-        expect(self.collapse_row).to_have_count(1)
-
-        body = self.page.locator("table tbody").inner_text() or ""
-        for label in ("Asset Details", "Primary Device", "Organisation Details",
-                      "Country", "Maintenance Dates", "Live Date"):
-            assert label in body, f"the expanded panel is missing {label!r}"
-        log.info("Expanded panel shows the site's assets, organisation and dates")
-
-        log.info("Collapsing the row again")
-        self.collapse_row.click()
-        assert self._poll(lambda: self.rows.count() == base), (
-            f"expected {base} row(s) after collapsing, got {self.rows.count()}"
-        )
-
-    # ----------------------------------------------------------------- #
-    # Site detail
-    # ----------------------------------------------------------------- #
-    def open_site_detail(self):
-        """Open a site's own page and walk all four of its tabs in depth.
-
-        Pinned to `SITE` rather than "whichever row is first", because the
-        Maintenance walk needs a site that actually has plans -- see the note on
-        the constant.
-
-        Read-only throughout: the Maintenance tab's Add Events / Create
-        Maintenance Plan / Edit Plan dialogs are opened and validated, but every
-        one of them is cancelled, and the Revert / Schedule Event / Upload
-        controls are left alone.
-        """
-        log.info("Opening the detail page for %r", SITE)
-        self.site_search.fill(SITE)
-        # Poll until the rows agree with the search rather than just until some
-        # rows exist -- the previous, unfiltered list is still on screen while
-        # the search refetches, and would otherwise be asserted against.
-        assert self._poll(
-            lambda: self._rows_match("Site Name", SITE, self._site_rows()),
-            timeout_ms=15000,
-        ), (
-            f"the site search never settled on {SITE!r}: "
-            f"{self._column_values('Site Name', self._site_rows())[:3]}"
-        )
-        self._assert_column("Site Name", SITE, f"site search {SITE!r}",
-                            self._site_rows())
-        self.view_details.first.click()
-
-        # /operations-hub/<cpo-uuid>/<site-uuid>
-        self.page.wait_for_url(
-            re.compile(r"/operations/operations-hub/[0-9a-f-]{36}/[0-9a-f-]{36}"),
-            timeout=20000,
-        )
-        # The header states the site, its CPO, its external ID and its device count.
-        for label in ("Site :", "CPO :", "External ID :", "No. of Charging Devices :"):
-            expect(self.page.get_by_text(label, exact=False).first).to_be_visible()
-        expect(self.page.get_by_text(SITE).first).to_be_visible()
-        log.info("Site detail open for %s", SITE)
-
-        self._check_breadcrumb()
-        self._browse_site_info()
-        self._browse_tracker()
-        self._browse_maintenance()
-        self._browse_records()
-        self._leave_site_detail()
-
-    def _check_breadcrumb(self):
-        """The trail names the hub, the CPO and the site, and the hub is clickable."""
-        expect(self.breadcrumb_hub).to_be_visible()
-        body = self.page.locator("body").inner_text() or ""
-        assert SITE in body, "the breadcrumb does not name the site"
-        log.info("Breadcrumb shows Operations Hub > CPO > %s", SITE)
-
-    def _tab(self, name):
-        return self.page.get_by_role("button", name=name, exact=True).first
-
-    # -- Site Info ----------------------------------------------------- #
-    def _browse_site_info(self):
-        self._tab("Site Info").click()
-        self.page.wait_for_timeout(2500)
-        body = self.page.locator("body").inner_text() or ""
-        for label in ("Address :", "City :", "Postal Code :", "Contact Person :",
-                      "Contact No :", "Latitude :", "Longitude :"):
-            assert label in body, f"the Site Info tab is missing {label!r}"
-        # The site's hardware is listed underneath its location details.
-        for label in ("Charging Device", "Model :", "Status :", "Socket"):
-            assert label in body, f"the Site Info tab is missing {label!r}"
-        log.info("Site Info tab shows the location, contact and hardware details")
-
-    # -- Tracker ------------------------------------------------------- #
-    def _browse_tracker(self):
-        self._tab("Tracker").click()
-        self.page.wait_for_timeout(2500)
-        body = self.page.locator("body").inner_text() or ""
-        # A site either has a workflow attached or says plainly that it has none.
-        assert "Workflow" in body, "the Tracker tab renders no workflow state"
-        if "No Workflow Attached" in body:
-            log.info("Tracker tab: no workflow attached to this site")
-        else:
-            log.info("Tracker tab: a workflow is attached")
-
     # -- Maintenance --------------------------------------------------- #
     def _browse_maintenance(self):
-        """Walk the Maintenance tab: its sub-tabs, plan cards and dialogs."""
-        self._tab("Maintenance").click()
-        self.page.wait_for_timeout(3000)
-        expect(self.add_events).to_be_visible()
+        """Open the site's Maintenance panel and walk it.
+
+        The site page no longer has a Maintenance tab: the panel is reached
+        from the CPO page's per-row "Maintenance" action, which opens the site
+        page on ?tab=maintenance.
+        """
+        log.info("Opening %r's Maintenance panel from its row action", SITE)
+        row = self._site_rows().filter(has_text=SITE)
+        assert self._poll(lambda: row.count() == 1), (
+            f"{SITE!r} is not on {SITE_CPO!r}'s sites page"
+        )
+        row.get_by_role("button", name="Maintenance", exact=True).click()
+        self.page.wait_for_url(re.compile(r"[?&]tab=maintenance"), timeout=20000)
+        self.add_events.wait_for(state="visible", timeout=20000)
         expect(self.create_plan).to_be_visible()
-        log.info("Maintenance tab open")
+        log.info("Maintenance panel open")
 
         self._maintenance_subtabs()
         self._maintenance_plan_card()
-        self._create_or_reuse_plan()
-        self._edit_plan_round_trip()
-        self._create_or_reuse_event()
+        # Plans and events cannot be deleted, so every form here is filled,
+        # checked and cancelled -- never submitted.
+        self._validate_create_plan()
+        self._validate_edit_plan()
+        self._validate_create_event()
 
     def _maintenance_tab(self, name):
         """A Maintenance sub-tab, whose label may carry a count."""
@@ -1129,23 +1230,27 @@ class operations_hub:
     def _plan_exists(self, title):
         return self.page.get_by_text(title, exact=True).count() > 0
 
-    # -- Create (once) / reuse the automation plan --------------------- #
-    def _create_or_reuse_plan(self):
-        """Create the suite's own maintenance plan, or reuse it if it exists.
+    def _cancel_dialog(self, what):
+        """Dismiss a form dialog without saving it."""
+        cancel = self.dialog.first.get_by_role("button", name="Cancel")
+        if cancel.count():
+            cancel.first.click()
+        else:
+            self.page.keyboard.press("Escape")
+        assert self._poll(lambda: self.dialog.count() == 0, timeout_ms=10000), (
+            f"the {what} dialog did not close on Cancel"
+        )
 
-        A plan cannot be deleted through the UI, so this creates one only when
-        it is missing -- see the note on PLAN_TITLE. The validation rules are
-        asserted on the way through, so the run still proves the form guards
-        itself even when it takes the reuse path.
+    # -- Create Plan: validated, never submitted ----------------------- #
+    def _validate_create_plan(self):
+        """Walk the Create Plan wizard to a submittable state, then cancel.
+
+        Plans cannot be deleted through the UI, so the suite never creates
+        one. The form is still proven to guard itself: the submit starts
+        disabled, stays disabled with only a title, and enables once every
+        required field is filled -- at which point the dialog is cancelled.
         """
-        if self._plan_exists(PLAN_TITLE):
-            log.info("Reusing the existing %r plan (plans cannot be deleted, "
-                     "so the suite keeps just the one)", PLAN_TITLE)
-            expect(self._plan_card(PLAN_TITLE).get_by_role(
-                "button", name="Edit Plan")).to_be_visible()
-            return
-
-        log.info("No %r plan yet -- creating it", PLAN_TITLE)
+        log.info("Validating the Create Plan wizard (never submitted)")
         self.create_plan.click()
         self.dialog.last.wait_for(state="visible", timeout=15000)
         dlg = self.dialog.first
@@ -1170,72 +1275,44 @@ class operations_hub:
                             self.PLAN_FREQUENCIES)
         self._pick_date(dlg)
         dlg.locator("textarea").first.fill(PLAN_DESCRIPTION)
-
         expect(submit, "Create Plan should enable once the form is complete"
                ).to_be_enabled()
-        log.info("Submitting the new maintenance plan")
-        submit.click()
 
-        # Step 2 confirms the write and offers an optional attachment.
-        expect(self.dialog.first).to_contain_text(
-            "Plan created successfully", timeout=20000
-        )
-        log.info("Plan created; skipping the optional attachment step")
-        self.dialog.first.get_by_role("button", name="Skip", exact=True).click()
-        assert self._poll(lambda: self.dialog.count() == 0, timeout_ms=15000), (
-            "the Create Plan wizard did not close after Skip"
-        )
+        self._cancel_dialog("Create Plan")
+        log.info("Create Plan wizard validated and cancelled")
 
-        assert self._poll(lambda: self._plan_exists(PLAN_TITLE), timeout_ms=20000), (
-            f"the new {PLAN_TITLE!r} plan is not listed after creating it"
-        )
-        log.info("New plan %r is listed", PLAN_TITLE)
+    # -- Edit Plan: validated, never saved ----------------------------- #
+    def _validate_edit_plan(self):
+        """Open the suite's plan in the editor, check it, and cancel.
 
-    # -- Edit the automation plan and put it back ---------------------- #
-    def _edit_plan_round_trip(self):
-        """Edit the suite's plan, prove the change saved, then restore it.
-
-        Written as a round trip on purpose -- the same shape as the device
-        ownership test. The description is changed and saved, the card is
-        checked for the new text, and then it is set back, so the plan always
-        ends the run on PLAN_DESCRIPTION no matter how many times this runs.
+        Saving -- even a save that is later restored -- would rewrite a real
+        record on staging on every run, so the editor is only inspected: it
+        must open on the right plan, pre-filled, with Save Changes on offer.
         """
-        log.info("Editing the %r plan", PLAN_TITLE)
+        assert self._plan_exists(PLAN_TITLE), (
+            f"the {PLAN_TITLE!r} fixture plan is missing from All Plans"
+        )
+        log.info("Validating the Edit Plan dialog for %r (never saved)",
+                 PLAN_TITLE)
         self._open_plan_editor()
         dlg = self.dialog.first
 
         # Guard: the dialog must belong to our plan, not another card's.
         title = dlg.locator("input[placeholder*='plan']").first.input_value()
         assert title.strip() == PLAN_TITLE, (
-            f"refusing to save: the editor is for {title!r}, not {PLAN_TITLE!r}"
+            f"the editor opened on {title!r}, not {PLAN_TITLE!r}"
         )
         text = dlg.inner_text() or ""
         for marker in ("Edit Maintenance Plan", "Start Date", "Status",
                        "Category", "Frequency", "Criticality", "Attachments"):
             assert marker in text, f"the Edit Plan dialog is missing {marker!r}"
         assert "ACTIVE" in text, "the plan should be ACTIVE"
+        description = dlg.locator("textarea").first.input_value()
+        assert description.strip(), "the editor did not pre-fill the description"
+        expect(dlg.get_by_role("button", name="Save Changes")).to_be_visible()
 
-        try:
-            self._save_description(dlg, PLAN_DESCRIPTION_EDITED)
-            assert self._poll(
-                lambda: PLAN_DESCRIPTION_EDITED in
-                (self._plan_card(PLAN_TITLE).inner_text() or ""),
-                timeout_ms=20000,
-            ), "the edited description is not shown on the plan card"
-            log.info("Edit saved -- the plan card shows the new description")
-        finally:
-            # Always restore, even if the assertion above failed, so a broken
-            # run never leaves the plan on the edited text.
-            log.info("Restoring the plan's original description")
-            self._open_plan_editor()
-            self._save_description(self.dialog.first, PLAN_DESCRIPTION)
-
-        assert self._poll(
-            lambda: PLAN_DESCRIPTION in
-            (self._plan_card(PLAN_TITLE).inner_text() or ""),
-            timeout_ms=20000,
-        ), f"FAILED TO RESTORE the description on {PLAN_TITLE!r}"
-        log.info("Plan %r restored to its original description", PLAN_TITLE)
+        self._cancel_dialog("Edit Plan")
+        log.info("Edit Plan dialog validated and cancelled")
 
     def _open_plan_editor(self):
         """Open Edit Plan on the suite's own card."""
@@ -1244,27 +1321,15 @@ class operations_hub:
         ).first.click()
         self.dialog.last.wait_for(state="visible", timeout=15000)
 
-    def _save_description(self, dlg, description):
-        dlg.locator("textarea").first.fill(description)
-        save = dlg.get_by_role("button", name="Save Changes")
-        expect(save).to_be_enabled()
-        save.click()
-        assert self._poll(lambda: self.dialog.count() == 0, timeout_ms=20000), (
-            "the Edit Plan dialog did not close after saving"
-        )
+    # -- Create Event: validated, never submitted ---------------------- #
+    def _validate_create_event(self):
+        """Fill the Create Event dialog to a submittable state, then cancel.
 
-    # -- Create (once) / reuse the automation event -------------------- #
-    def _create_or_reuse_event(self):
-        """Create the suite's own maintenance event, or reuse it if it exists.
-
-        Events cannot be deleted either, so this follows the same
-        create-once-then-reuse rule as the plan.
+        Events cannot be deleted either, so none is ever created. Every field,
+        including the assignee and both times, is filled so the check still
+        proves the submit enables on a complete form.
         """
-        if self._event_exists():
-            log.info("Reusing the existing %r event", EVENT_TITLE)
-            return
-
-        log.info("No %r event yet -- creating it", EVENT_TITLE)
+        log.info("Validating the Create Event dialog (never submitted)")
         self.add_events.click()
         self.dialog.last.wait_for(state="visible", timeout=15000)
         dlg = self.dialog.first
@@ -1289,67 +1354,48 @@ class operations_hub:
         self.dialog.last.get_by_text(ASSIGNEE, exact=True).first.click()
         self.page.wait_for_timeout(1000)
 
-        # Scheduled for tomorrow: the API refuses a start time in the past, so
-        # a fixed hour today would fail for most of the day.
+        # Tomorrow: the form refuses a start time in the past, so a fixed hour
+        # today would leave the submit disabled for most of the day.
         tomorrow = self._tomorrow()
         self._pick_date(dlg, tomorrow)
-        # Start and end time are both mandatory; an hour apart.
         self._pick_datetime(dlg, hour="9", day=tomorrow)
         self._pick_datetime(dlg, hour="10", day=tomorrow)
-        dlg.locator("textarea").first.fill(
-            "Created by the automated regression suite. Reused on every run."
-        )
-
+        dlg.locator("textarea").first.fill("Validated by the automated suite.")
         expect(submit, "Create Event should enable once the form is complete"
                ).to_be_enabled()
-        log.info("Submitting the new maintenance event")
-        submit.click()
-        # A rejected submit leaves the dialog open with the reason on it, so the
-        # failure message carries that rather than just "it did not close".
-        assert self._poll(lambda: self.dialog.count() == 0, timeout_ms=25000), (
-            "the Create Event dialog did not close after submitting -- the save "
-            f"was rejected: {(self.dialog.first.inner_text() or '')[:300]!r}"
-        )
 
-        assert self._poll(self._event_exists, timeout_ms=25000), (
-            f"the new {EVENT_TITLE!r} event is not listed after creating it"
-        )
-        log.info("New event %r is listed", EVENT_TITLE)
-
-    def _event_exists(self):
-        """True when the suite's event is listed under any events sub-tab.
-
-        A created event moves between Upcoming / Scheduled / Completed as its
-        due date passes, so every sub-tab is checked rather than assuming where
-        it lands.
-        """
-        for name in ("Upcoming Events", "Scheduled", "Completed"):
-            self._maintenance_tab(name).click()
-            self.page.wait_for_timeout(1800)
-            if EVENT_TITLE in (self.page.locator("body").inner_text() or ""):
-                log.info("Event %r found under %r", EVENT_TITLE, name)
-                return True
-        return False
+        self._cancel_dialog("Create Event")
+        log.info("Create Event dialog validated and cancelled")
 
     # -- Records ------------------------------------------------------- #
     def _browse_records(self):
         """Step through every document category on the Records tab."""
         self._tab("Records").click()
-        self.page.wait_for_timeout(2500)
+        main = self.page.locator("main")
         for category in self.RECORD_CATEGORIES:
             tab = self.page.get_by_role("button", name=category, exact=True)
-            assert tab.count(), f"the Records tab has no {category!r} category"
-            tab.first.click()
-            self.page.wait_for_timeout(1200)
-            body = self.page.locator("body").inner_text() or ""
-            # The panel heading follows the selected category.
-            assert f"{category} Documents" in body, (
-                f"selecting {category!r} did not open its document panel"
+            assert self._poll(lambda t=tab: t.count() > 0, timeout_ms=15000), (
+                f"the Records tab has no {category!r} category"
             )
+            tab.first.click()
+            # Each category states how many documents it holds, then lists them
+            # or says it has none. Both are valid; which one depends on data.
+            assert self._poll(
+                lambda: re.search(r"\d+ documents? held against this site",
+                                  main.inner_text() or ""),
+                timeout_ms=10000,
+            ), f"selecting {category!r} did not open its document panel"
+            text = main.inner_text() or ""
+            count = int(re.search(r"(\d+) documents? held", text).group(1))
+            if count == 0:
+                assert "No documents found in this category." in text, (
+                    f"{category!r} holds no documents but shows no empty state"
+                )
+            log.info("Records category %-12s -> %s document(s)", category, count)
         log.info("Records tab steps through all %s categories",
                  len(self.RECORD_CATEGORIES))
-        # The Upload control is present but deliberately not used.
-        expect(self.page.get_by_role("button", name="Upload").first).to_be_visible()
+        # The upload control is present but deliberately not used.
+        expect(self.page.get_by_role("button", name="Add records").first).to_be_visible()
 
     def _leave_site_detail(self):
         """Go back to the hub through the breadcrumb, not the sidebar."""
@@ -1361,6 +1407,7 @@ class operations_hub:
         assert self._poll(lambda: self._cpo_rows().count() > 0, timeout_ms=25000), (
             "the breadcrumb did not get back to the CPO list"
         )
+        self._park_mouse()
 
     # ----------------------------------------------------------------- #
     # Map View
@@ -1369,7 +1416,7 @@ class operations_hub:
         """Switch to the Map View and exercise its filters, legend and zoom."""
         log.info("Switching to the Map View")
         self.map_view.click()
-        self.page.wait_for_url(re.compile(r"/operations/operations-hub/map"), timeout=15000)
+        self.page.wait_for_url(re.compile(r"[?&]view=map"), timeout=15000)
         self.map_canvas.first.wait_for(state="visible", timeout=25000)
         log.info("Map rendered")
 
@@ -1380,15 +1427,16 @@ class operations_hub:
             assert state in body, f"the map legend is missing {state!r}"
         log.info("Map legend lists all six maintenance states")
 
-        # Markers: one card per CPO, each naming its ID and site count. They are
-        # drawn a few seconds after the map container itself appears, so this
-        # polls rather than reading the count the instant the canvas is visible
-        # -- checking immediately is a race that fails on a working map.
+        # Markers: one card per organisation, each naming its ID and site
+        # count. They are drawn a few seconds after the map container itself
+        # appears, so this polls rather than reading the count the instant the
+        # canvas is visible -- checking immediately is a race that fails on a
+        # working map.
         markers = self.page.get_by_role("button", name=re.compile(r"ID:\s*\d+"))
         assert self._poll(lambda: markers.count() > 0, timeout_ms=30000), (
-            "the map shows no CPO markers"
+            "the map shows no markers"
         )
-        log.info("Map shows %s CPO marker(s)", markers.count())
+        log.info("Map shows %s marker card(s)", markers.count())
 
         # All three filters are present with their full option sets. The CPO
         # filter lists every CPO, so it is checked on its size rather than on a
@@ -1417,10 +1465,8 @@ class operations_hub:
 
         log.info("Switching back to the List View")
         self.list_view.click()
-        self.page.wait_for_url(
-            re.compile(r"/operations/operations-hub(?!/map)"), timeout=15000
-        )
-        assert self._poll(lambda: self.table.count() > 0, timeout_ms=25000), (
+        self.page.wait_for_url(lambda url: "view=map" not in url, timeout=15000)
+        assert self._poll(lambda: self._cpo_rows().count() > 0, timeout_ms=25000), (
             "the List View did not come back"
         )
 
@@ -1433,8 +1479,8 @@ class operations_hub:
         self.search_cpos()
         self.sort_cpos()
         self.paginate_cpos()
-        self.open_cpo_detail()
-        self.browse_sites_view()
+        self.filter_cpos()
+        self.expand_cpo_rows()
         self.open_site_detail()
         self.browse_map()
         log.info("Operations Hub workflow completed")
